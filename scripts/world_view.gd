@@ -49,6 +49,11 @@ var _dock_dir := Vector2.UP
 var _club_flag: Node3D
 
 
+## Scenery beyond the shore: the mountains, the farm buildings and the trees. Off, for a plain,
+## clear shoreline (Doug, 18 Nov: it's a simulator). The land, the club and its dock stay.
+const SCENERY := false
+
+
 func build(lake_ref) -> void:
 	lake = lake_ref
 	for c in get_children():
@@ -61,9 +66,13 @@ func build(lake_ref) -> void:
 	_make_water()
 	_plan_farms()
 	_make_land()
-	_make_mountains()
+	if SCENERY:
+		_make_mountains()
 	_make_club()
-	_make_farms_and_trees()
+	if SCENERY:
+		_make_farms_and_trees()
+	else:
+		land_mat.set_shader_parameter("farm_count", 0)
 	_make_marks()
 	_make_highlight()
 	update_water(0.0, 270.0, 5.0, PackedVector4Array())

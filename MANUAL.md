@@ -379,7 +379,7 @@ godot --path . res://tests/view_test.tscn -- cam=close shot=C:/tmp/close.png   #
 - `scripts/race.gd`, `course.gd`, `rules.gd`: the sailing instructions and Part 2 calls
 - `scripts/ai.gd`: AI skippers
 - `scripts/fleet.gd`: steps everything together, including contact with boats, marks and the shore
-- `scripts/world_view.gd`: sky, water (wind chop, puffs, shallows), farmland, the Front Range,
+- `scripts/world_view.gd` (the mountains, farm buildings and trees are switched off with `SCENERY := false`, for a plain, clear shoreline; the land, the club and its dock stay): sky, water (wind chop, puffs, shallows), farmland, the Front Range,
   the USC club and dock, marks 1–9, the committee boat with its flags and course board, and the pin
 - `scripts/boat_view.gd`: the Snipe model, built in code: a moulded hard-chine hull with sheer
   spring, a full bow that closes into a rounded tip, a raked stem, a flat transom raked a little,

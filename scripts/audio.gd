@@ -34,9 +34,9 @@ func _ready() -> void:
 	horn.max_distance = 4000.0
 	horn.max_polyphony = 3
 	horn.doppler_tracking = AudioStreamPlayer3D.DOPPLER_TRACKING_DISABLED
-	wind.stream = _noise(3.0, 0.08, 0.0)
-	water.stream = _noise(2.5, 0.25, 0.0)
-	flap.stream = _noise(1.0, 0.6, 9.0)
+	wind.stream = _ambient(29.0, 0, 7)
+	water.stream = _ambient(19.0, 1, 11)
+	flap.stream = _ambient(5.0, 2, 13)
 	for p in [wind, water, flap]:
 		p.volume_db = -60.0
 		p.play()
@@ -65,13 +65,21 @@ func _process(dt: float) -> void:
 		horn.play()
 
 
+var _wind_v := 0.0
+var _water_v := 0.0
+
+
 ## Called every frame with the player's boat: apparent wind (m/s), speed (m/s), luffing 0..1.
+## Wind in the ears is quiet in a drifter and builds with the apparent wind; the water along
+## the hull builds with boat speed. Levels ease toward their targets, so nothing switches on.
 func ambience(aws: float, speed: float, luff: float) -> void:
-	wind.volume_db = _db(clampf((aws - 1.0) / 10.0, 0.0, 1.0) * 0.55 * master)
-	wind.pitch_scale = 0.8 + clampf(aws / 12.0, 0.0, 0.6)
-	water.volume_db = _db(clampf(speed / 4.0, 0.0, 1.0) * 0.6 * master)
-	water.pitch_scale = 0.8 + clampf(speed / 6.0, 0.0, 0.5)
-	flap.volume_db = _db(clampf(luff, 0.0, 1.0) * clampf(aws / 8.0, 0.0, 1.0) * 0.5 * master)
+	_wind_v = lerpf(_wind_v, pow(clampf((aws - 1.0) / 11.0, 0.0, 1.0), 1.3) * 0.5, 0.04)
+	wind.volume_db = _db(_wind_v * master)
+	wind.pitch_scale = 0.9 + clampf(aws / 14.0, 0.0, 0.35)
+	_water_v = lerpf(_water_v, pow(clampf(speed / 4.5, 0.0, 1.0), 1.2) * 0.5, 0.04)
+	water.volume_db = _db(_water_v * master)
+	water.pitch_scale = 0.9 + clampf(speed / 7.0, 0.0, 0.3)
+	flap.volume_db = _db(clampf(luff, 0.0, 1.0) * clampf(aws / 8.0, 0.0, 1.0) * 0.45 * master)
 
 
 static func _db(x: float) -> float:
@@ -159,29 +167,58 @@ static func _read(table: PackedFloat32Array, phase: float) -> float:
 	return lerpf(table[i % table.size()], table[(i + 1) % table.size()], fr)
 
 
-## Looping filtered noise. `bright` 0..1 sets the low-pass; `flutter_hz` > 0 amplitude-modulates.
-static func _noise(seconds: float, bright: float, flutter_hz: float) -> AudioStreamWAV:
-	var n := int(seconds * RATE)
+const AMB_RATE := 11025
+
+## Looping ambience that doesn't sound like a loop: `seconds` long, its tail cross-faded into
+## its head so there is no gap or click at the join, with slow uneven swells all through it.
+## kind 0: wind, a low roar with a little air over it. 1: water along the hull, lapping.
+## 2: a sail flogging, in uneven flaps.
+static func _ambient(seconds: float, kind: int, seed_v: int) -> AudioStreamWAV:
+	var n := int(seconds * AMB_RATE)
+	var xf := int(1.5 * AMB_RATE)
+	var buf := PackedFloat32Array()
+	buf.resize(n + xf)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_v
+	# Low-pass and high-pass coefficients, gains for the low and middle bands, and the swell:
+	# how long each level holds (s), how low it dips, how fast it moves.
+	var a1: float = [0.12, 0.7, 0.6][kind]
+	var a2: float = [0.002, 0.14, 0.05][kind]
+	var g_lo: float = [2.2, 0.9, 1.1][kind]
+	var g_mid: float = [0.45, 0.0, 0.0][kind]
+	var hold_min: float = [0.5, 0.25, 0.07][kind]
+	var hold_max: float = [1.6, 0.9, 0.16][kind]
+	var e_min: float = [0.45, 0.15, 0.0][kind]
+	var e_k: float = [0.0004, 0.002, 0.01][kind]
+	var lo := 0.0
+	var lo2 := 0.0
+	var hp := 0.0
+	var env := 0.7
+	var target := 0.7
+	var left := 0
+	for i in n + xf:
+		var w := rng.randf_range(-1.0, 1.0)
+		lo += (w - lo) * a1
+		lo2 += (lo - lo2) * a1
+		hp += (lo2 - hp) * a2
+		if left <= 0:
+			left = int(rng.randf_range(hold_min, hold_max) * AMB_RATE)
+			target = rng.randf_range(e_min, 1.0)
+		left -= 1
+		env += (target - env) * e_k
+		buf[i] = ((lo2 - hp) * g_lo + (lo - lo2) * g_mid) * env
 	var data := PackedByteArray()
 	data.resize(n * 2)
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 7
-	var y := 0.0
-	var y2 := 0.0
 	for i in n:
-		var t := float(i) / RATE
-		y += (rng.randf_range(-1.0, 1.0) - y) * bright
-		y2 += (y - y2) * bright
-		var s := y2 * 2.2
-		if flutter_hz > 0.0:
-			s *= 0.5 + 0.5 * sin(TAU * flutter_hz * t + 1.3 * sin(TAU * 1.7 * t))
-		# Fade the ends so the loop has no click.
-		var edge := minf(minf(t, seconds - t) / 0.05, 1.0)
-		data.encode_s16(i * 2, int(clampf(s * edge, -1.0, 1.0) * 20000.0))
-	var w := AudioStreamWAV.new()
-	w.format = AudioStreamWAV.FORMAT_16_BITS
-	w.mix_rate = RATE
-	w.data = data
-	w.loop_mode = AudioStreamWAV.LOOP_FORWARD
-	w.loop_end = n
-	return w
+		var v := buf[i]
+		if i < xf:
+			var f := float(i) / xf
+			v = v * sin(f * PI * 0.5) + buf[n + i] * cos(f * PI * 0.5)
+		data.encode_s16(i * 2, int(clampf(v, -1.0, 1.0) * 20000.0))
+	var out := AudioStreamWAV.new()
+	out.format = AudioStreamWAV.FORMAT_16_BITS
+	out.mix_rate = AMB_RATE
+	out.data = data
+	out.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	out.loop_end = n
+	return out

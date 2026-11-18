@@ -59,6 +59,7 @@ const BOARD_W := 0.521       # its width fore and aft at the top
 const BOARD_CASE_H := 0.31   # the case's top above the keel (class: 310 mm)
 const BOARD_FWD_X := 0.36    # its forward edge, at the front of the cockpit
 const BOARD_BAND_DECK := 0.18  # from the top of the case up to the deck, for the limit band
+const COMPASS_X := 0.93      # the tactical compass, in the point of the splash guard
 const POLE_MAST_H := 0.95   # where the whisker pole clips onto the mast
 
 
@@ -486,6 +487,8 @@ var label: Label3D
 var wake_mi: MeshInstance3D
 var _phase := 0.0
 var _board_drawn := 1.0
+var compass_labels: Array[Label3D] = []   # the heading, on the compass's two screens
+var _compass_shown := -1
 var skipper_side := 1.0   # the side the skipper sits on (1 starboard, -1 port), for the helm camera
 var _crew_side := 1.0
 var _decal_vp: SubViewport
@@ -586,6 +589,23 @@ func setup(color: Color, number: String, player: bool) -> void:
 	pole_mi.visible = false
 	pivot.add_child(pole_mi)
 
+	# The heading in degrees on each of the compass's two screens.
+	compass_labels.clear()
+	for sd: float in [-1.0, 1.0]:
+		var cl := Label3D.new()
+		cl.name = "CompassPort" if sd < 0.0 else "CompassStbd"
+		cl.text = "000"
+		cl.font_size = 64
+		cl.pixel_size = 0.00071
+		cl.outline_size = 0
+		cl.modulate = Color(0.04, 0.05, 0.04)
+		cl.shaded = false
+		cl.double_sided = false
+		cl.position = hp(COMPASS_X, 0.0, deck_h(COMPASS_X, 0.0) - 0.004) + Vector3(sd * 0.04, 0.0525, 0.0045) + Vector3(sd * 0.7071, 0.0, 0.7071) * 0.003
+		cl.rotation.y = sd * PI * 0.25
+		pivot.add_child(cl)
+		compass_labels.append(cl)
+	_compass_shown = -1
 	_build_sails()
 	_build_crew()
 	_build_details()
@@ -1021,13 +1041,29 @@ func _build_hull() -> ArrayMesh:
 	dark.cyl(Vector3(0, MAST_TOP - 0.02, mz), Vector3(0, MAST_TOP + 0.04, mz), 0.026, black, 10, 0.02, true)
 	var dh := deck_h(BoatSim.MAST_X, 0.0)
 	dark.cyl(Vector3(0, dh - 0.01, mz), Vector3(0, dh + 0.05, mz), 0.05, black, 14, 0.042, true)
-	# Compass on the aft face of the mast, where the crew can read it.
-	# A digital tactical compass (Tacktick or Velocitek style): a dark case on a bracket, its
-	# screen facing aft.
-	dark.loft([rrect_ring(Vector3(0, 0.95, mz + 0.035), Vector3.RIGHT, Vector3.UP, 0.055, 0.07, 0.012),
-		rrect_ring(Vector3(0, 0.95, mz + 0.068), Vector3.RIGHT, Vector3.UP, 0.055, 0.07, 0.012)], black, true, true)
-	gel.loft([rrect_ring(Vector3(0, 0.962, mz + 0.0685), Vector3.RIGHT, Vector3.UP, 0.043, 0.042, 0.006),
-		rrect_ring(Vector3(0, 0.962, mz + 0.0705), Vector3.RIGHT, Vector3.UP, 0.043, 0.042, 0.006)], Color(0.42, 0.46, 0.42), true, true)
+	# Tactical compass, tucked into the point of the splash guard: a grey wedge with two screens
+	# angled out to port and starboard, so the helm reads one from either side deck.
+	var cmp_cc := hp(COMPASS_X, 0.0, deck_h(COMPASS_X, 0.0) - 0.004)
+	var cmp_ch := 0.105
+	var cmp_case_c := Color(0.36, 0.37, 0.4)
+	var cmp_plan := [Vector2(0.0, 0.045), Vector2(0.08, -0.036), Vector2(0.027, -0.075), Vector2(-0.027, -0.075), Vector2(-0.08, -0.036)]
+	var cmp_ctop := cmp_cc + Vector3(0.0, cmp_ch, -0.02)
+	for i in cmp_plan.size():
+		var cmp_a2: Vector2 = cmp_plan[i]
+		var cmp_b2: Vector2 = cmp_plan[(i + 1) % cmp_plan.size()]
+		var cmp_a3 := cmp_cc + Vector3(cmp_a2.x, 0.0, cmp_a2.y)
+		var cmp_b3 := cmp_cc + Vector3(cmp_b2.x, 0.0, cmp_b2.y)
+		var cmp_outn := Vector3(cmp_b2.y - cmp_a2.y, 0.0, -(cmp_b2.x - cmp_a2.x))
+		if cmp_outn.dot(Vector3((cmp_a2.x + cmp_b2.x) * 0.5, 0.0, (cmp_a2.y + cmp_b2.y) * 0.5 + 0.02)) < 0.0:
+			cmp_outn = -cmp_outn
+		dark.quad(cmp_a3, cmp_b3, cmp_b3 + Vector3(0, cmp_ch, 0), cmp_a3 + Vector3(0, cmp_ch, 0), cmp_case_c, cmp_outn)
+		dark.tri(cmp_ctop, cmp_a3 + Vector3(0, cmp_ch, 0), cmp_b3 + Vector3(0, cmp_ch, 0), cmp_case_c.lightened(0.1), Vector3.UP)
+	for cmp_sd: float in [-1.0, 1.0]:
+		var face_n := Vector3(cmp_sd * 0.7071, 0.0, 0.7071)
+		var face_along := Vector3(cmp_sd * 0.7071, 0.0, -0.7071)
+		var face_c := cmp_cc + Vector3(cmp_sd * 0.04, cmp_ch * 0.5, 0.0045) + face_n * 0.0012
+		gel.quad(face_c - face_along * 0.043 - Vector3(0, 0.027, 0), face_c + face_along * 0.043 - Vector3(0, 0.027, 0),
+			face_c + face_along * 0.043 + Vector3(0, 0.027, 0), face_c - face_along * 0.043 + Vector3(0, 0.027, 0), Color(0.66, 0.71, 0.62), face_n)
 
 	# Standing rigging: aerofoil spreaders, shrouds with adjusters, forestay.
 	var hounds := Vector3(0, HOUNDS, mz)
@@ -1941,6 +1977,13 @@ func sync(sim, time: float) -> void:
 	var dist := cam.global_position.distance_to(global_position) if cam != null else 0.0
 	var near := dist < DETAIL_DIST
 	_pose_details(sim, near, capsized, time, jtack, jtack + stay * JIB_LUFF, jclew, tack, mhead, clew)
+	var hd := int(fposmod(rad_to_deg(float(sim.heading)), 360.0))
+	for cl in compass_labels:
+		cl.visible = near
+		if near and hd != _compass_shown:
+			cl.text = "%03d" % hd
+	if near:
+		_compass_shown = hd
 	sheet_mi.visible = near
 	sheet2_mi.visible = near
 	jibsheet_mi.visible = false

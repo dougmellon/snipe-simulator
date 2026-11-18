@@ -405,6 +405,7 @@ func _process(delta: float) -> void:
 	var luff := clampf(1.0 - absf(b.main_alpha) / 0.09, 0.0, 1.0) if not b.capsized else 0.0
 	audio.ambience(b.aws, b.speed(), luff)
 	hud.warp = WARPS[warp_i]
+	hud.helm_view = cam.mode == CameraRig.Mode.HELM
 	hud.cam_name = CameraRig.NAMES[cam.mode]
 	ideal_t -= delta
 	if ideal_t <= 0.0:

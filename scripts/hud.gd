@@ -16,6 +16,7 @@ var warp := 1
 var cam_name := ""
 var ideal := Vector2(-1, -1)  # ideal main/jib sheet for the player's boat
 var sim := true    # simulator: compass and watch only
+var helm_view := false  # the camera is at the helm, where the compass on the foredeck shows the heading
 var coach := false # show the coach numbers anyway
 var tiller_mode := true  # the helm gauge shows where the tiller handle is
 var pad := false   # show game pad controls instead of keys (set by main.gd from the last input)
@@ -225,12 +226,17 @@ func _draw_instruments(b, race, e) -> void:
 			_text(p + Vector2(150, 102), "VMG upwind  %.1f kn" % vmg_w, 16, DIM)
 	else:
 		# Tactical compass: big heading digits, the way a Velocitek or Tacktick shows it.
-		_text(p + Vector2(14, 64), "%03d" % int(hdg), 58, Color.WHITE, -1, HORIZONTAL_ALIGNMENT_LEFT, true)
-		_text(p + Vector2(16, 86), "compass", 14, DIM)
-		_text(p + Vector2(120, 64), "%.1f" % (b.speed() / KN), 34, Color.WHITE, -1, HORIZONTAL_ALIGNMENT_LEFT, true)
-		_text(p + Vector2(122, 86), "kn", 14, DIM)
+		# From the helm the heading is read off the compass by the splash guard; in the other views it is here.
+		if helm_view:
+			_text(p + Vector2(14, 64), "%.1f" % (b.speed() / KN), 52, Color.WHITE, -1, HORIZONTAL_ALIGNMENT_LEFT, true)
+			_text(p + Vector2(16, 86), "knots", 14, DIM)
+		else:
+			_text(p + Vector2(14, 64), "%03d" % int(hdg), 58, Color.WHITE, -1, HORIZONTAL_ALIGNMENT_LEFT, true)
+			_text(p + Vector2(16, 86), "compass", 14, DIM)
+			_text(p + Vector2(120, 64), "%.1f" % (b.speed() / KN), 34, Color.WHITE, -1, HORIZONTAL_ALIGNMENT_LEFT, true)
+			_text(p + Vector2(122, 86), "kn", 14, DIM)
 		_text(p + Vector2(190, 40), "%s tack" % tack, 18, Color.WHITE)
-		_text(p + Vector2(190, 64), "Trim by the telltales and shroud yarns;", 14, DIM)
+		_text(p + Vector2(190, 64), "Trim by the telltales and yarns;", 14, DIM)
 		_text(p + Vector2(190, 84), "puffs show as dark water.", 14, DIM)
 		_text(p + Vector2(190, 104), _k("I: coach numbers", "Touchpad: coach numbers"), 14, Color(1, 1, 1, 0.4))
 	# Heel: on the water you feel it; here it gets a gauge.

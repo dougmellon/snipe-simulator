@@ -10,11 +10,17 @@ uniform vec3 clew = vec3(0.0, 1.17, 2.1);
 // Camber depth as a fraction of the chord; the sign picks the side (+ toward +X of a chord running aft).
 uniform float belly = 0.1;
 uniform float twist = 0.15;
+// Where the deepest point of the camber is, as a fraction of the chord from the luff.
+uniform float draft = 0.444;
+// Sideways sag of the luff at mid-height (m), to leeward: a jib on a slack forestay.
+uniform float luff_sag = 0.0;
 uniform float roach = 0.0;
 uniform float foot_attached = 0.0;
 uniform float flutter = 0.0;
 uniform float phase = 0.0;
 uniform float batten_count = 0.0;
+// A clear window (u0, v0, u1, v1) in the sail's UV; none when zero.
+uniform vec4 window_box = vec4(0.0);
 uniform vec3 cloth : source_color = vec3(0.95, 0.95, 0.92);
 uniform sampler2D decal : source_color, filter_linear_mipmap, repeat_disable;
 uniform bool has_decal = false;
@@ -26,6 +32,15 @@ uniform vec4 bird_box = vec4(0.3, 3.55, 0.45, 0.45);
 varying vec2 sail_m;
 varying vec3 n_view;
 varying vec2 uv_s;
+
+// Camber shape along the chord, 1 at the draft position (u^a (1-u)^b with its peak at draft).
+// BoatView.sail_frame() has the same shape for the telltales.
+float camber(float u) {
+	float a = max(1.0, draft / (1.0 - draft));
+	float b = max(1.0, (1.0 - draft) / draft);
+	float peak = pow(draft, a) * pow(1.0 - draft, b);
+	return pow(clamp(u, 0.0, 1.0), a) * pow(clamp(1.0 - u, 0.0, 1.0), b) / peak;
+}
 
 vec3 sail_point(vec2 uv) {
 	float u = uv.x;
@@ -44,22 +59,68 @@ vec3 sail_point(vec2 uv) {
 	vec3 p = luff + d * u;
 	vec3 n = vec3(d.z, 0.0, -d.x);
 	n /= max(length(n), 1e-4);
-	float shape = 3.05 * u * (1.0 - u) * (1.0 + 0.6 * (1.0 - u));
+	float shape = camber(u);
 	float foot = mix(1.0, smoothstep(0.0, 0.14, v), foot_attached);
 	p += n * belly * len * shape * foot;
+	p += n * side * luff_sag * sin(3.14159 * v) * (1.0 - u);
 	float wave = sin(TIME * 17.0 + phase - u * 11.0 + v * 7.0) + 0.5 * sin(TIME * 29.0 + phase * 1.7 - u * 19.0);
 	float env = 4.0 * u * (1.0 - u) * (1.0 - u) * (1.0 - 0.6 * v);
 	p += n * flutter * len * 0.11 * wave * env;
 	return p;
 }
 
+// The rig the cloth can't pass through. Mainsail: the leeward shroud, from the chainplate
+// (shroud_base, as |x|, height, z) up to the spreader tip and in to the hounds. Jib: the mast,
+// which its after part stays outside of, on the side mast_side.
+uniform float mast_z = -0.75;
+uniform vec3 shroud_base = vec3(0.0);
+uniform vec3 shroud_tip = vec3(0.0);
+uniform vec3 shroud_top = vec3(0.0);
+uniform float mast_side = 0.0;
+uniform float boom_keep = 0.0;  // tan of the boom's angle when it is on the jib's side, else 0
+
+vec3 rig_fit(vec3 p) {
+	if (shroud_base.x > 0.0 && p.y > shroud_base.y && p.y < shroud_top.y) {
+		vec3 s = p.y < shroud_tip.y ? mix(shroud_base, shroud_tip, (p.y - shroud_base.y) / (shroud_tip.y - shroud_base.y))
+				: mix(shroud_tip, shroud_top, (p.y - shroud_tip.y) / (shroud_top.y - shroud_tip.y));
+		vec2 sd = vec2(s.x, s.z - mast_z);
+		float rs = length(sd);
+		vec2 d = vec2(abs(p.x), p.z - mast_z);
+		float r = length(d);
+		if (rs > 0.02 && r > 0.001) {
+			// Angles about the mast, from dead aft. The cloth stays just behind the shroud: inboard
+			// of the wire it lies along the line from the mast to it, and outboard of it the sail
+			// carries on from the wire the way it was going, so there is a crease along the shroud.
+			// The bend is put 15 cm outboard of the wire and the cloth runs straight past the wire
+			// itself, 5 cm or so behind it: the mesh's flat facets would cut a bend made at the
+			// wire and show the wire through the sail.
+			float ths = atan(sd.x, sd.y) - 0.07;
+			if (atan(d.x, d.y) > ths) {
+				vec2 es = vec2(sin(ths), cos(ths));
+				float rk = rs + 0.15;
+				d = r <= rk ? es * r : d + (es - d / r) * rk;
+				p.x = (p.x < 0.0 ? -1.0 : 1.0) * d.x;
+				p.z = mast_z + d.y;
+			}
+		}
+	}
+	if (mast_side != 0.0 && p.z > mast_z - 0.3) {
+		float f = smoothstep(mast_z - 0.3, mast_z - 0.03, p.z);
+		float lat = p.x * mast_side;
+		// Outside the mast, and aft of it outside the boom and the main's luff.
+		float keep = 0.065 + max(p.z - mast_z, 0.0) * boom_keep;
+		p.x = mast_side * mix(lat, max(lat, keep), f);
+	}
+	return p;
+}
+
 void vertex() {
 	vec2 uv = UV;
-	vec3 p = sail_point(uv);
+	vec3 p = rig_fit(sail_point(uv));
 	vec2 uq = vec2(uv.x, min(uv.y, 0.96));
-	vec3 pq = sail_point(uq);
-	vec3 du = sail_point(uq + vec2(0.02, 0.0)) - pq;
-	vec3 dv = sail_point(uq + vec2(0.0, 0.02)) - pq;
+	vec3 pq = rig_fit(sail_point(uq));
+	vec3 du = rig_fit(sail_point(uq + vec2(0.02, 0.0))) - pq;
+	vec3 dv = rig_fit(sail_point(uq + vec2(0.0, 0.02))) - pq;
 	vec3 nrm = normalize(cross(dv, du));
 	VERTEX = p;
 	NORMAL = nrm;
@@ -83,6 +144,17 @@ void fragment() {
 	bool stbd = dot(ns, VIEW) > 0.0;
 	NORMAL = stbd ? ns : -ns;
 	vec3 col = cloth;
+	// The window is clear film: cut out so you see through it, with a stitched border round it.
+	if (window_box.z > 0.0) {
+		vec2 wd = abs(uv_s - (window_box.xy + window_box.zw) * 0.5) / ((window_box.zw - window_box.xy) * 0.5);
+		float wm = max(wd.x, wd.y);
+		if (wm < 1.0) {
+			discard;
+		}
+		if (wm < 1.16) {
+			col *= 0.82;
+		}
+	}
 	// Crosscut panel seams, roughly perpendicular to the leech.
 	float seam_y = sail_m.y + sail_m.x * 0.35;
 	float fs = fwidth(seam_y);

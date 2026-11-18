@@ -44,6 +44,22 @@ func _start(tiller: bool, kn: float) -> Object:
 	return b
 
 
+func _pad_axis(axis: JoyAxis, value: float) -> void:
+	var ev := InputEventJoypadMotion.new()
+	ev.device = 0
+	ev.axis = axis
+	ev.axis_value = value
+	Input.parse_input_event(ev)
+
+
+func _pad_button(button: JoyButton, pressed: bool) -> void:
+	var ev := InputEventJoypadButton.new()
+	ev.device = 0
+	ev.button_index = button
+	ev.pressed = pressed
+	Input.parse_input_event(ev)
+
+
 func _hold(action: String, frames: int) -> void:
 	Input.action_press(action)
 	await _frames(frames)
@@ -113,6 +129,91 @@ func _run() -> void:
 	check(b.tiller > 0.3, "dragging left moves the tiller handle to port (tiller %.2f)" % b.tiller)
 	check(b.main_sheet < 0.6, "drawing the mouse back pulls the main in (%.2f)" % b.main_sheet)
 	check(not main.mouse_helm, "releasing the button lets go")
+
+	print("game pad (synthetic events, as a PS5 or Xbox pad sends them)")
+	b = _start(true, 10.0)
+	main.fleet.assist["main"] = false
+	main.fleet.assist["hike"] = false
+	b.main_sheet = 0.6
+	await _frames(10)
+	_pad_axis(JOY_AXIS_LEFT_X, -0.9)
+	await _frames(10)
+	check(b.tiller > 0.6, "left stick to port puts the tiller handle to port (tiller %.2f)" % b.tiller)
+	check(main.hud.pad, "the HUD switches to pad hints")
+	_pad_axis(JOY_AXIS_LEFT_X, -0.3)
+	await _frames(5)
+	check(b.tiller > 0.05 and b.tiller < 0.2, "a small push is a small, fine correction (tiller %.2f)" % b.tiller)
+	_pad_axis(JOY_AXIS_LEFT_X, 0.0)
+	await _frames(5)
+	check(absf(b.tiller) < 0.01, "let go of the stick and the tiller centres (%.2f)" % b.tiller)
+	_pad_axis(JOY_AXIS_TRIGGER_RIGHT, 0.95)
+	await _frames(40)
+	_pad_axis(JOY_AXIS_TRIGGER_RIGHT, 0.0)
+	check(b.main_sheet < 0.5, "R2 pulls the main in (%.2f)" % b.main_sheet)
+	var s1: float = b.main_sheet
+	_pad_axis(JOY_AXIS_TRIGGER_LEFT, 0.95)
+	await _frames(20)
+	_pad_axis(JOY_AXIS_TRIGGER_LEFT, 0.0)
+	check(b.main_sheet > s1 + 0.1, "L2 eases it (%.2f)" % b.main_sheet)
+	# The last of it to the centreline comes in slower.
+	var rates := []
+	for from: float in [0.6, 0.08]:
+		b.main_sheet = from
+		await _frames(2)
+		_pad_axis(JOY_AXIS_TRIGGER_RIGHT, 0.95)
+		await _frames(15)
+		_pad_axis(JOY_AXIS_TRIGGER_RIGHT, 0.0)
+		rates.append(from - b.main_sheet)
+	check(rates[1] < 0.8 * rates[0], "R2 brings it in slower near the centreline (%.3f vs %.3f)" % [rates[1], rates[0]])
+	b.main_sheet = 0.5
+	var h1: float = b.hike
+	_pad_button(JOY_BUTTON_B, true)
+	await _frames(30)
+	_pad_button(JOY_BUTTON_B, false)
+	check(b.hike > h1 + 0.2, "Circle hikes out (%.2f to %.2f)" % [h1, b.hike])
+	var h2: float = b.hike
+	_pad_button(JOY_BUTTON_X, true)
+	await _frames(30)
+	_pad_button(JOY_BUTTON_X, false)
+	check(b.hike < h2 - 0.2, "Square moves in (%.2f to %.2f)" % [h2, b.hike])
+	b.board = 1.0
+	_pad_button(JOY_BUTTON_DPAD_UP, true)
+	await _frames(30)
+	_pad_button(JOY_BUTTON_DPAD_UP, false)
+	check(b.board < 0.92, "D-pad up raises the centreboard (%.2f)" % b.board)
+	var bd: float = b.board
+	_pad_button(JOY_BUTTON_DPAD_DOWN, true)
+	await _frames(30)
+	_pad_button(JOY_BUTTON_DPAD_DOWN, false)
+	check(b.board > bd + 0.1, "D-pad down lowers it (%.2f to %.2f)" % [bd, b.board])
+	var mode0: int = main.cam.mode
+	_pad_button(JOY_BUTTON_A, true)
+	await _frames(2)
+	_pad_button(JOY_BUTTON_A, false)
+	await _frames(2)
+	check(main.cam.mode != mode0, "Cross changes the camera")
+	main.cam.mode = mode0
+	_pad_axis(JOY_AXIS_RIGHT_X, 0.9)
+	await _frames(5)
+	check(main.cam.yaw_off > 1.0, "right stick to the right looks right (%.2f)" % main.cam.yaw_off)
+	_pad_axis(JOY_AXIS_RIGHT_X, 1.0)
+	await _frames(5)
+	check(main.cam.yaw_off > 2.8, "...right round to the stern at full stick (%.2f)" % main.cam.yaw_off)
+	_pad_axis(JOY_AXIS_RIGHT_X, 0.0)
+	_pad_axis(JOY_AXIS_RIGHT_Y, -0.9)
+	await _frames(5)
+	check(main.cam.pitch_off > 0.5, "right stick up looks up (%.2f)" % main.cam.pitch_off)
+	_pad_axis(JOY_AXIS_RIGHT_Y, 0.0)
+	_pad_axis(JOY_AXIS_RIGHT_X, 0.0)
+	await _frames(90)
+	check(absf(main.cam.yaw_off) < 0.05 and absf(main.cam.pitch_off) < 0.05, "...and the view comes back ahead (%.2f, %.2f)" % [main.cam.yaw_off, main.cam.pitch_off])
+	for pressed in [true, false]:
+		var key := InputEventKey.new()
+		key.physical_keycode = KEY_W
+		key.pressed = pressed
+		Input.parse_input_event(key)
+	await _frames(2)
+	check(not main.hud.pad, "touching a key switches the hints back to keys")
 
 	print("controls_test: %s" % ("PASS" if fails == 0 else "FAIL (%d)" % fails))
 	quit(1 if fails > 0 else 0)

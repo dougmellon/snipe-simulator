@@ -4,3 +4,6 @@
 /android/
 /build/
 *.tmp
+
+# Working notes for this PC only; not published
+HANDOFF.md

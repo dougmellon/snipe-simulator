@@ -14,11 +14,28 @@ const Hud := preload("res://scripts/hud.gd")
 const Minimap := preload("res://scripts/minimap.gd")
 const Menu := preload("res://scripts/menu.gd")
 const Overlay := preload("res://scripts/overlay.gd")
+const Recorder := preload("res://scripts/recorder.gd")
+const Analysis := preload("res://scripts/analysis.gd")
+const Replay := preload("res://scripts/replay.gd")
+const ReplayBar := preload("res://scripts/replay_bar.gd")
+const Targets := preload("res://scripts/targets.gd")
 
 const HULLS := [Color(0.85, 0.12, 0.1), Color(0.1, 0.25, 0.7), Color(0.95, 0.95, 0.92), Color(0.1, 0.45, 0.25),
 	Color(0.95, 0.75, 0.1), Color(0.15, 0.15, 0.18), Color(0.55, 0.75, 0.9), Color(0.6, 0.2, 0.45),
 	Color(0.9, 0.45, 0.1), Color(0.75, 0.75, 0.7)]
 const PLAYER_HULL := Color(0.05, 0.55, 0.75)
+const BoatSim := preload("res://scripts/boat_sim.gd")
+## Rig controls on the keyboard: [boat field, action that lowers it, action that raises it, rate
+## per second, low, high, name for messages]. Units are the guide's: inches (vang 0..1).
+const RIG_KEYS := [
+	["outhaul", "outhaul_flat", "outhaul_ease", 1.5, 0.0, BoatSim.OUTHAUL_MAX, "outhaul"],
+	["cunningham", "cunningham_ease", "cunningham_on", 1.0, 0.0, BoatSim.CUNNINGHAM_MAX, "cunningham"],
+	["vang", "vang_ease", "vang_on", 0.5, 0.0, 1.0, "vang"],
+	["traveler", "traveler_up", "traveler_down", 3.0, 0.0, BoatSim.TRAVELER_MAX, "traveler"],
+	["puller", "puller_aft", "pusher_fwd", 0.375, BoatSim.PULLER_MIN, BoatSim.PULLER_MAX, "mast pusher/puller"],
+	["halyard", "halyard_on", "halyard_ease", 4.0, 0.0, BoatSim.HALYARD_THROW, "jib halyard"],
+	["jib_lead", "lead_aft", "lead_fwd", 1.0, -BoatSim.LEAD_MAX, BoatSim.LEAD_MAX, "jib lead"],
+]
 const WARPS := [1, 2, 4, 8]
 const KN := 0.514444
 
@@ -33,7 +50,7 @@ var minimap
 var menu
 var overlay
 var cfg := {}
-var state := "menu"  # menu, sailing, paused, results
+var state := "menu"  # menu, sailing, paused, results, replay
 var warp_i := 0
 var race_no := 1
 var day := {}
@@ -53,6 +70,30 @@ var tracks: Array = []
 var track_t := 0.0
 const TRACK_EVERY := 0.6
 const TRACK_LEN := 19
+## Session recording, debrief and replay (see scripts/recorder.gd, analysis.gd, replay.gd).
+const REPLAY_SPEEDS := [1, 2, 4, 8]
+var recorder
+var session_id := ""
+var session := {}
+var analyses: Array = []
+var replay
+var replay_bar
+var replay_t := 0.0
+var replay_playing := true
+var replay_speed_i := 0
+var replay_follow := 0
+var step_advance := 0.0  # how far the fleet clock moved in the last physics frame
+## Game pad (PS5 / Xbox, SDL standard layout). pad_dev is the pad that gets rumble and the
+## lightbar colour; -1 when none is connected.
+var pad_dev := -1
+var pad_helm := false   # the left stick is steering; centre the tiller when it lets go
+var board_goal := 1.0       # where the player has put the daggerboard: down, or BoatSim.BOARD_UP
+var pole_cmd_t := -10.0  # fleet time of the last pole command
+var pad_look := false   # the right stick turned the camera; ease it back when it lets go
+var rumble_t := 0.0
+var flutter := false
+var bump := Vector2.ZERO  # (weak, strong) motor burst for a knock, capsize or grounding
+var bump_t := 0.0
 
 
 func _ready() -> void:
@@ -83,11 +124,32 @@ func _ready() -> void:
 	overlay.next_race.connect(_next_race)
 	overlay.to_menu.connect(_to_menu)
 	overlay.quit_game.connect(func(): get_tree().quit())
+	overlay.debrief.connect(_show_debrief)
+	overlay.watch.connect(_start_replay)
+	overlay.results_back.connect(_results_screen)
+	replay_bar = ReplayBar.new()
+	ui.add_child(replay_bar)
+	replay_bar.hide()
+	replay_bar.back.connect(_show_debrief)
+	replay_bar.toggle_play.connect(func(): replay_playing = not replay_playing)
+	replay_bar.cycle_speed.connect(func(): replay_speed_i = (replay_speed_i + 1) % REPLAY_SPEEDS.size())
+	replay_bar.seek.connect(func(t: float): replay_t = t)
 	menu = Menu.new()
 	ui.add_child(menu)
 	menu.start_requested.connect(_on_start)
 	menu.quit_requested.connect(func(): get_tree().quit())
+	Input.joy_connection_changed.connect(func(_d: int, _c: bool): _pick_pad())
+	_pick_pad()
+	hud.pad = pad_dev >= 0
 	_start_demo()
+
+
+## Use the first connected pad for rumble, and light its lightbar in your hull colour.
+func _pick_pad() -> void:
+	var pads := Input.get_connected_joypads()
+	pad_dev = pads[0] if not pads.is_empty() else -1
+	if pad_dev >= 0 and Input.has_joy_light(pad_dev):
+		Input.set_joy_light(pad_dev, PLAYER_HULL)
 
 
 # --- Sessions -------------------------------------------------------------------------
@@ -144,7 +206,7 @@ func _begin() -> void:
 	minimap.fleet = fleet
 	minimap.show()
 	_layout_map()
-	# Rigged ashore for the forecast: vang and outhaul set for the wind, as a crew would.
+	# Rigged ashore for the forecast: every control set for the wind upwind, as a crew would.
 	var pb = fleet.boats[fleet.player]
 	pb.tws = fleet.wind.base_speed
 	pb.twa = 0.7
@@ -153,6 +215,13 @@ func _begin() -> void:
 	cam.view = views[fleet.player]
 	cam.race = fleet.race
 	cam.mode = CameraRig.Mode.HELM if sim else CameraRig.Mode.CHASE
+	# Every race you sail is recorded for the debrief and replay.
+	if fleet.race != null:
+		recorder = Recorder.new()
+		if recorder.open(cfg, fleet, "race%d" % race_no):
+			fleet.recorder = recorder
+		else:
+			recorder = null
 	if fleet.race != null:
 		hud.add_message("Race %d. Wind %03d° at %.0f kn. Flag L is up: check in by sailing past the RC boat's transom on starboard." % [race_no, int(fleet.wind.base_from), fleet.wind.base_speed / KN] if fleet.race.phase == Race.Phase.CHECKIN else "Race %d. Wind %03d° at %.0f kn." % [race_no, int(fleet.wind.base_from), fleet.wind.base_speed / KN])
 	else:
@@ -160,6 +229,13 @@ func _begin() -> void:
 
 
 func _load_fleet(c: Dictionary) -> void:
+	_close_recorder()
+	session_id = ""
+	session = {}
+	analyses = []
+	replay = null
+	if replay_bar != null:
+		replay_bar.hide()
 	for v in views:
 		v.queue_free()
 	views.clear()
@@ -219,7 +295,7 @@ func _to_menu() -> void:
 # --- Loop ---------------------------------------------------------------------------------
 
 func _physics_process(delta: float) -> void:
-	if fleet == null or state == "paused" or state == "results":
+	if fleet == null or state == "paused" or state == "results" or state == "replay":
 		return
 	if state == "sailing":
 		_player_input(delta)
@@ -238,8 +314,10 @@ func _physics_process(delta: float) -> void:
 		8:
 			steps = 3
 			dt = delta * 8.0 / 3.0
+	var t_before: float = fleet.time
 	for s in steps:
 		fleet.step(dt)
+	step_advance = fleet.time - t_before
 	_record_tracks()
 	_handle_events()
 
@@ -253,7 +331,22 @@ func _process(delta: float) -> void:
 			if fleet.race.phase == Race.Phase.DONE:
 				break
 		_handle_events()
-	var a := Engine.get_physics_interpolation_fraction()
+	if state == "replay":
+		# Draw the recording, not the physics: set every boat from the session at replay_t.
+		if replay_playing:
+			replay_t = minf(replay_t + delta * REPLAY_SPEEDS[replay_speed_i], replay.t1)
+			if replay_t >= replay.t1:
+				replay_playing = false
+		replay_t = clampf(replay_t, replay.t0, replay.t1)
+		replay.apply(replay_t, fleet.boats)
+		fleet.time = replay_t
+		for i in fleet.boats.size():
+			var rb = fleet.boats[i]
+			prev[i] = [rb.pos, rb.heading, rb.heel]
+	# Draw every frame between the last two physics steps: position, heading and heel, and the
+	# clock the sails, crew and water animate by, so nothing moves in 120 Hz steps.
+	var a := Engine.get_physics_interpolation_fraction() if state != "replay" else 1.0
+	var vt: float = fleet.time - (1.0 - a) * step_advance
 	var hulls := PackedVector4Array()
 	var speeds := PackedFloat32Array()
 	for i in views.size():
@@ -261,22 +354,53 @@ func _process(delta: float) -> void:
 		var p: Array = prev[i]
 		var pos: Vector2 = b.pos
 		var h: float = b.heading
+		var hl: float = b.heel
 		b.pos = p[0].lerp(pos, a)
 		b.heading = lerp_angle(p[1], h, a)
-		views[i].sync(b, fleet.time)
+		if not b.capsized:
+			b.heel = lerpf(p[2], hl, a)
+		views[i].sync(b, vt)
 		hulls.append(Vector4(b.pos.x, b.pos.y, b.heading, b.heel))
 		speeds.append(b.u)
 		b.pos = pos
 		b.heading = h
-	world.update_water(fleet.time, fleet.wind.mean_from(), fleet.wind.base_speed, fleet.wind.shader_puffs())
+		b.heel = hl
+	if state == "replay":
+		# The recording keeps the mean wind, not the puffs, so the water shows no cat's paws.
+		var w: Vector2 = replay.wind_at(replay_t)
+		world.update_water(vt, w.x, w.y, PackedVector4Array())
+	else:
+		world.update_water(vt, fleet.wind.mean_from(), fleet.wind.base_speed, fleet.wind.shader_puffs())
 	world.update_hulls(hulls if cut_hulls else PackedVector4Array())
 	world.update_hull_speeds(speeds)
-	world.update_wakes(_wake_tracks())
+	world.update_wakes(replay.wake_tracks(replay_t, views) if state == "replay" else _wake_tracks())
 
 	if state == "menu":
 		_menu_camera(delta)
 		return
+	if state == "replay":
+		cam.follow(delta)
+		world.highlight_mark("")
+		replay_bar.update_view(replay_t, replay_playing, REPLAY_SPEEDS[replay_speed_i], _replay_info())
+		return
+	# Right stick: turn your head the way you push it, right round to the stern at full
+	# sideways, and up or down; it comes back ahead when you let go.
+	var look := Input.get_axis("pad_look_left", "pad_look_right")
+	var lookv := Input.get_axis("pad_look_down", "pad_look_up")
+	if look != 0.0 or lookv != 0.0:
+		pad_look = true
+		cam.yaw_off = signf(look) * pow(absf(look), 1.3) * 2.95
+		cam.pitch_off = lookv * 0.9
+	elif pad_look:
+		var kb := clampf(delta * 6.0, 0.0, 1.0)
+		cam.yaw_off = lerpf(cam.yaw_off, 0.0, kb)
+		cam.pitch_off = lerpf(cam.pitch_off, 0.0, kb)
+		if absf(cam.yaw_off) < 0.01 and absf(cam.pitch_off) < 0.01:
+			cam.yaw_off = 0.0
+			cam.pitch_off = 0.0
+			pad_look = false
 	cam.follow(delta)
+	_pad_feedback(delta)
 	var b = fleet.boats[fleet.player]
 	var luff := clampf(1.0 - absf(b.main_alpha) / 0.09, 0.0, 1.0) if not b.capsized else 0.0
 	audio.ambience(b.aws, b.speed(), luff)
@@ -299,6 +423,46 @@ func _process(delta: float) -> void:
 			_show_results()
 
 
+## Rumble while sailing: a light buzz that builds with the load on the rudder, a flutter when
+## the main luffs, and a thump when you capsize, touch a boat or mark, or run aground.
+func _pad_feedback(delta: float) -> void:
+	bump_t -= delta
+	rumble_t -= delta
+	if pad_dev < 0 or state != "sailing" or rumble_t > 0.0:
+		return
+	rumble_t = 0.1
+	var b = fleet.boats[fleet.player]
+	var weak := 0.0
+	var strong := 0.0
+	if not b.capsized:
+		weak = clampf((b.rudder_load - 40.0) / 320.0, 0.0, 0.35)
+		if absf(b.main_alpha) < 0.08 and b.aws > 2.0:
+			flutter = not flutter
+			weak = maxf(weak, 0.32 if flutter else 0.12)
+		# Pulling the main in on R2: the sheet gets harder the closer the boom comes to the
+		# centreline and the more the sail is loaded, and it thumps at the stop. (The pad's
+		# triggers can't be stiffened from Godot, so the motors do it.)
+		var pull := Input.get_action_strength("pad_sheet_in")
+		if pull > 0.1:
+			var near := 1.0 - smoothstep(0.0, 0.4, float(b.main_sheet))
+			var load := clampf(float(b.main_load) / 300.0, 0.0, 1.0)
+			weak = maxf(weak, pull * (0.06 + 0.5 * near) * (0.5 + 0.5 * load))
+			strong = maxf(strong, pull * 0.45 * near * near * load)
+			if b.main_sheet <= 0.001:
+				strong = maxf(strong, 0.4 * pull)
+	if bump_t > 0.0:
+		weak = maxf(weak, bump.x)
+		strong = maxf(strong, bump.y)
+	if weak > 0.01 or strong > 0.01:
+		Input.start_joy_vibration(pad_dev, weak, strong, 0.15)
+
+
+func _bump(weak: float, strong: float, seconds: float) -> void:
+	bump = Vector2(weak, strong)
+	bump_t = seconds
+	rumble_t = 0.0
+
+
 func _menu_camera(delta: float) -> void:
 	menu_t += delta
 	var c: Vector3 = Lake.to_3d(lake.marks["1"], 0.0)
@@ -310,14 +474,20 @@ func _menu_camera(delta: float) -> void:
 func _handle_events() -> void:
 	var race = fleet.race
 	for ev: Dictionary in fleet.events:
-		if state != "sailing" or ev["boat"] != fleet.player:
+		if state != "sailing" or (ev["boat"] != fleet.player and ev.get("other", -1) != fleet.player):
 			continue
 		match ev["type"]:
 			"capsize":
 				hud.flash("Capsized!")
-				hud.add_message("Capsized. The crew rights her in a few seconds (R to hurry).", true)
+				hud.add_message("Capsized. The crew rights her in a few seconds (R or Triangle to hurry).", true)
+				_bump(0.6, 1.0, 0.7)
 			"aground":
 				hud.add_message("Aground! Steer back toward open water.", true)
+				_bump(0.3, 0.7, 0.4)
+			"contact":
+				_bump(0.5, 0.8, 0.25)
+			"mark":
+				_bump(0.4, 0.55, 0.2)
 	fleet.events.clear()
 	if race == null:
 		return
@@ -350,10 +520,10 @@ func _handle_events() -> void:
 	if e.finished and not e.has_meta("banner"):
 		e.set_meta("banner", true)
 		hud.flash("FINISHED  %s" % _ordinal(race.place_of(e)) if e.status == "" else "FINISHED (%s)" % e.status)
-		hud.add_message("Press Enter to skip ahead to the results.", true)
+		hud.add_message("Press Enter (Triangle on the pad) to skip ahead to the results.", true)
 	elif e.status != "" and not e.finished and not e.has_meta("banner"):
 		e.set_meta("banner", true)
-		hud.add_message("Press Enter to skip ahead to the results.", true)
+		hud.add_message("Press Enter (Triangle on the pad) to skip ahead to the results.", true)
 
 
 func _show_results() -> void:
@@ -374,7 +544,105 @@ func _show_results() -> void:
 			day[e.sail] = []
 		day[e.sail].append(pts)
 		day_names[e.sail] = e.name
-	overlay.show_results(race, race_no, day, day_names)
+	session_id = _close_recorder()
+	_results_screen()
+
+
+func _results_screen() -> void:
+	state = "results"
+	replay_bar.hide()
+	minimap.show()
+	overlay.show_results(fleet.race, race_no, day, day_names, session_id != "")
+
+
+func _close_recorder() -> String:
+	if recorder == null:
+		return ""
+	var id: String = recorder.close(fleet)
+	if fleet != null:
+		fleet.recorder = null
+	recorder = null
+	return id
+
+
+## Loads the race just sailed and analyses every boat in it (once), then shows your debrief.
+func _show_debrief() -> void:
+	state = "results"
+	replay_bar.hide()
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	if session.is_empty() and session_id != "":
+		session = Recorder.load_session(session_id)
+	if session.is_empty():
+		overlay.show_message("No recording", "This race wasn't recorded, so there's nothing to debrief.")
+		return
+	if analyses.is_empty():
+		var targets := Targets.load_all()
+		for i in fleet.boats.size():
+			analyses.append(Analysis.run(session, i, targets))
+	var me: int = fleet.player if fleet.player >= 0 else 0
+	overlay.show_debrief(analyses[me], Analysis.fleet_compare(analyses, me), race_no, session["meta"])
+
+
+## Replays the race from time t (fleet time), following your boat.
+func _start_replay(t: float) -> void:
+	if session.is_empty():
+		return
+	if replay == null:
+		replay = Replay.new()
+		replay.setup(session)
+	overlay.hide()
+	hud.hide()
+	minimap.show()
+	state = "replay"
+	replay_t = clampf(t, replay.t0, replay.t1)
+	replay_playing = true
+	replay_speed_i = 0
+	replay_follow = fleet.player if fleet.player >= 0 else 0
+	_follow(replay_follow)
+	var gun: Variant = session["meta"].get("gun_t")
+	replay_bar.setup(replay.t0, replay.t1, float(gun) if gun != null else replay.t0)
+	replay_bar.show()
+	audio.master = 0.25
+
+
+func _follow(i: int) -> void:
+	replay_follow = i
+	cam.sim = fleet.boats[i]
+	cam.view = views[i]
+
+
+## Who the camera follows, and the move they're in if there is one.
+func _replay_info() -> String:
+	var txt := "Following %s." % fleet.names[replay_follow]
+	if replay_follow < analyses.size():
+		for r: Dictionary in analyses[replay_follow]["moves"]:
+			if absf(replay_t - float(r["t"])) <= 20.0:
+				txt += "  %s at %s: %s." % [Analysis.move_name(r), Race.fmt_clock(r["clock"]),
+					("lost %.1f m (%.1f lengths)" % [r["loss_m"], r["lengths"]]) if r["clean"] else "too close to another move to score"]
+				break
+	if hud.pad:
+		return txt + "   Triangle play/pause, L3 speed, D-pad left/right 5 s, L1/R1 30 s, Cross camera, R3 next boat, Options debrief."
+	return txt + "   Space play/pause, T speed, A/D or arrows 5 s (Shift 30 s), C camera, Tab next boat, Esc debrief."
+
+
+func _replay_input(ev: InputEvent) -> void:
+	if ev.is_action_pressed("pause"):
+		_show_debrief()
+	elif ev.is_action_pressed("center_helm") or ev.is_action_pressed("board") or ev.is_action_pressed("skip"):
+		replay_playing = not replay_playing
+	elif ev.is_action_pressed("warp"):
+		replay_speed_i = (replay_speed_i + 1) % REPLAY_SPEEDS.size()
+	elif ev.is_action_pressed("steer_left") or ev.is_action_pressed("steer_right"):
+		var jump := 30.0 if Input.is_key_pressed(KEY_SHIFT) else 5.0
+		replay_t += -jump if ev.is_action_pressed("steer_left") else jump
+	elif ev.is_action_pressed("vang_ease") or ev.is_action_pressed("vang_on"):
+		replay_t += -5.0 if ev.is_action_pressed("vang_ease") else 5.0
+	elif ev.is_action_pressed("jib_out") or ev.is_action_pressed("jib_in"):
+		replay_t += -30.0 if ev.is_action_pressed("jib_out") else 30.0
+	elif ev.is_action_pressed("camera"):
+		cam.cycle()
+	elif ev.is_action_pressed("standings") or ev.is_action_pressed("map"):
+		_follow((replay_follow + 1) % fleet.boats.size())
 
 
 static func _ordinal(n: int) -> String:
@@ -395,12 +663,19 @@ func _helm_sign() -> float:
 func _player_input(delta: float) -> void:
 	var b = fleet.boats[fleet.player]
 	var steer := Input.get_axis("steer_left", "steer_right")
-	var joy := Input.get_joy_axis(0, JOY_AXIS_LEFT_X)
+	# On a pad the left stick is the tiller handle itself: where the stick is, the handle is,
+	# with a little expo so small corrections are fine. Let go and it centres. (The keys move
+	# the handle at a rate and leave it where it is.)
+	var stick := Input.get_axis("pad_tiller_port", "pad_tiller_stbd")
 	# A hand on the extension moves the tiller about full throw in half a second; Alt is the
 	# fingertip adjustment you make when she's in the groove.
 	var rate := 0.6 if Input.is_key_pressed(KEY_ALT) else 2.0
-	if absf(joy) > 0.15:
-		b.tiller = _helm_sign() * joy
+	if stick != 0.0:
+		pad_helm = true
+		b.tiller = _helm_sign() * signf(stick) * pow(absf(stick), 1.5)
+	elif pad_helm:
+		pad_helm = false
+		b.tiller = 0.0
 	elif steer != 0.0:
 		b.tiller = move_toward(b.tiller, _helm_sign() * steer, delta * rate)
 	elif not sim:
@@ -408,15 +683,21 @@ func _player_input(delta: float) -> void:
 	# In the simulator the helm stays where you leave it; Space brings it back to the middle.
 	if Input.is_action_pressed("center_helm"):
 		b.tiller = move_toward(b.tiller, 0.0, delta * 3.0)
-	var vg := Input.get_axis("vang_ease", "vang_on")
-	var fl := Input.get_axis("outhaul_ease", "outhaul_flat")
-	if vg != 0.0 or fl != 0.0:
-		if fleet.assist.get("rig", false):
-			fleet.assist["rig"] = false
-			hud.add_message("You have the vang and outhaul now (pause menu hands them back to the crew).", true)
-		b.vang = clampf(b.vang + vg * delta * 0.5, 0.0, 1.0)
-		b.flatten = clampf(b.flatten + fl * delta * 0.5, 0.0, 1.0)
-	var main := Input.get_axis("main_in", "main_out") + Input.get_joy_axis(0, JOY_AXIS_RIGHT_Y)
+	# Rig controls: touching one takes it over from the crew (the pause menu hands it back).
+	for rk: Array in RIG_KEYS:
+		var ax := Input.get_axis(rk[1], rk[2])
+		if ax == 0.0:
+			continue
+		_take_rig(rk[0], rk[6])
+		b.set(rk[0], clampf(float(b.get(rk[0])) + ax * delta * float(rk[3]), rk[4], rk[5]))
+	# The daggerboard goes to where the player last put it; while the crew has it, follow them.
+	if fleet.rig_manual.has("board") or not fleet.assist.get("rig", false):
+		b.board = move_toward(b.board, board_goal, delta * 1.6)
+	else:
+		board_goal = 1.0 if b.board > 0.6 else BoatSim.BOARD_UP
+	# R2 pulls the main in, L2 eases it; how hard you squeeze sets how fast. It comes in slower
+	# under load and over the last of it to the centreline (BoatSim.sheet_rate).
+	var main := Input.get_axis("main_in", "main_out") + Input.get_axis("pad_sheet_in", "pad_sheet_out")
 	if absf(main) > 0.15:
 		if fleet.assist["main"]:
 			fleet.assist["main"] = false
@@ -425,14 +706,14 @@ func _player_input(delta: float) -> void:
 	var jib := Input.get_axis("jib_in", "jib_out")
 	if jib != 0.0:
 		if fleet.assist["jib"]:
-			fleet.assist["jib"] = false
-			hud.add_message("Auto jib off: you're trimming the jib (J to turn it back on).", true)
+			fleet.set_assist("jib", false)
+			hud.add_message("Auto jib off: you're trimming the jib and handling the pole (J gives them back).", true)
 		b.jib_sheet = clampf(b.jib_sheet + jib * delta * 0.5, 0.0, 1.0)
 	var hk := Input.get_axis("hike_in", "hike_out")
 	if hk != 0.0:
 		if fleet.assist["hike"]:
 			fleet.assist["hike"] = false
-			hud.add_message("Auto hike off: Shift hikes out, Ctrl moves in (H for auto).", true)
+			hud.add_message("Auto hike off: %s (H for auto)." % ("Circle hikes out, Square moves in" if hud.pad else "Shift hikes out, Ctrl moves in"), true)
 		b.hike = clampf(b.hike + hk * delta * 1.2, -1.0, 1.0)
 
 
@@ -456,6 +737,9 @@ func _unhandled_input(ev: InputEvent) -> void:
 			mb.main_sheet = clampf(mb.main_sheet - dy * (mb.sheet_rate(false) / 0.55 if dy > 0.0 else 1.0), 0.0, 1.0)
 		return
 	if state == "menu":
+		return
+	if state == "replay":
+		_replay_input(ev)
 		return
 	if ev.is_action_pressed("pause"):
 		if state == "sailing":
@@ -482,18 +766,31 @@ func _unhandled_input(ev: InputEvent) -> void:
 		hud.show_board = true
 	elif ev.is_action_released("standings"):
 		hud.show_board = false
-	elif ev.is_action_pressed("right_boat"):
-		if b.capsized and b.capsize_t < b.RIGHT_MIN:
+	elif ev.is_action_pressed("pole") and _pole_ok(b):
+		_pole_command(b)
+	elif ev.is_action_pressed("tune"):
+		hud.show_tune = not hud.show_tune
+	elif ev.is_action_pressed("right_boat") and b.capsized:
+		# (Only when she's over, so Triangle on the pad still reaches the skip below.)
+		if b.capsize_t < b.RIGHT_MIN:
 			hud.add_message("The crew is still swimming round to the centreboard.", true)
 		b.right_now()
 	elif ev.is_action_pressed("coach"):
 		hud.coach = not hud.coach
 		hud.add_message("Coach numbers " + ("on" if hud.coach else "off"), true)
-	elif ev.is_action_pressed("board"):
-		b.board = 0.5 if b.board > 0.75 else (0.0 if b.board > 0.25 else 1.0)
+	elif ev.is_action_pressed("board") or ev.is_action_pressed("board_up") or ev.is_action_pressed("board_down"):
+		# Two places: down, or raised to the limit band.
+		_take_rig("board", "daggerboard")
+		if ev.is_action_pressed("board_up"):
+			board_goal = BoatSim.BOARD_UP
+		elif ev.is_action_pressed("board_down"):
+			board_goal = 1.0
+		else:
+			board_goal = BoatSim.BOARD_UP if board_goal > 0.6 else 1.0
+		hud.add_message("Daggerboard " + ("down" if board_goal > 0.6 else "raised to the band"), true)
 	elif ev.is_action_pressed("auto_jib"):
-		fleet.assist["jib"] = not fleet.assist["jib"]
-		hud.add_message("Auto jib " + ("on" if fleet.assist["jib"] else "off"), true)
+		fleet.set_assist("jib", not fleet.assist["jib"])
+		hud.add_message("Auto jib " + ("on: the crew trims the jib and handles the pole" if fleet.assist["jib"] else "off"), true)
 	elif ev.is_action_pressed("auto_hike"):
 		fleet.assist["hike"] = not fleet.assist["hike"]
 		hud.add_message("Auto hike " + ("on" if fleet.assist["hike"] else "off"), true)
@@ -506,6 +803,55 @@ func _unhandled_input(ev: InputEvent) -> void:
 			var e = race.entrants[fleet.player]
 			if e.finished or not e.active():
 				fast_forward = true
+
+
+## The player takes a rig control over from the crew, if the crew had it.
+func _take_rig(field: String, label: String) -> void:
+	if fleet.assist.get("rig", false) and not fleet.rig_manual.has(field):
+		fleet.rig_manual[field] = true
+		hud.add_message("You have the %s now (the pause menu hands the rig back to the crew)." % label, true)
+
+
+## The pole button works while she's upright and still racing. (On the pad it is Triangle, which
+## rights a capsized boat and skips to the results after the finish the rest of the time.)
+func _pole_ok(b) -> bool:
+	if b.capsized:
+		return false
+	var race = fleet.race
+	if race != null:
+		var e = race.entrants[fleet.player]
+		if e.finished or not e.active():
+			return false
+	return true
+
+
+## Whisker pole: set it, stow it, or swap it to the new side after a gybe. Pressing it takes the
+## pole over from the crew.
+func _pole_command(b) -> void:
+	# One press, one command: a pad that shows up as two devices sends every press twice.
+	if fleet.time - pole_cmd_t < 0.4:
+		return
+	pole_cmd_t = fleet.time
+	if fleet.assist["jib"] and not fleet.rig_manual.has("pole"):
+		fleet.rig_manual["pole"] = true
+		hud.add_message("You have the whisker pole now (J, or the pause menu, gives it back to the crew).", true)
+	var st: int = b.pole_state
+	if st == BoatSim.POLE_STOWED:
+		if b.pole_set():
+			hud.add_message("Crew setting the whisker pole.", true)
+		else:
+			hud.add_message("Too close to the wind for the pole: bear away past a broad reach first.", true)
+	elif st == BoatSim.POLE_SET:
+		if b.pole_wrong_side():
+			b.pole_swap()
+			hud.add_message("Crew swapping the pole to the new side.", true)
+		else:
+			b.pole_stow()
+			hud.add_message("Crew stowing the pole.", true)
+	elif st == BoatSim.POLE_SETTING:
+		hud.add_message("The pole is on its way out; press again once it's set to stow it.", true)
+	else:
+		hud.add_message("The crew is busy with the pole.", true)
 
 
 func _layout_map() -> void:
@@ -521,6 +867,9 @@ func _layout_map() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_SIZE_CHANGED and minimap != null:
 		_layout_map()
+	elif what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_PREDELETE:
+		# Quitting mid-race still leaves a readable (incomplete) session.
+		_close_recorder()
 
 
 func _setup_input() -> void:
@@ -535,6 +884,12 @@ func _setup_input() -> void:
 		"pause": [KEY_ESCAPE, KEY_P], "skip": [KEY_ENTER, KEY_KP_ENTER],
 		"center_helm": [KEY_SPACE], "vang_ease": [KEY_Z], "vang_on": [KEY_X],
 		"outhaul_ease": [KEY_V], "outhaul_flat": [KEY_F], "coach": [KEY_I],
+		"cunningham_ease": [KEY_L], "cunningham_on": [KEY_O],
+		"traveler_down": [KEY_BRACKETLEFT], "traveler_up": [KEY_BRACKETRIGHT],
+		"puller_aft": [KEY_COMMA], "pusher_fwd": [KEY_PERIOD],
+		"halyard_ease": [KEY_MINUS], "halyard_on": [KEY_EQUAL],
+		"lead_aft": [KEY_SEMICOLON], "lead_fwd": [KEY_APOSTROPHE],
+		"board_up": [KEY_U], "board_down": [KEY_N], "pole": [KEY_G], "tune": [KEY_Y],
 	}
 	for action: String in keys:
 		if not InputMap.has_action(action):
@@ -543,6 +898,49 @@ func _setup_input() -> void:
 			var ev := InputEventKey.new()
 			ev.physical_keycode = k
 			InputMap.action_add_event(action, ev)
+	# Game pad buttons (SDL standard layout; on a PS5 pad A = Cross, B = Circle, X = Square,
+	# Y = Triangle, Back = Create, Start = Options).
+	var pad_buttons := {
+		"camera": [JOY_BUTTON_A], "right_boat": [JOY_BUTTON_Y], "skip": [JOY_BUTTON_Y], "pole": [JOY_BUTTON_Y],
+		"hike_out": [JOY_BUTTON_B], "hike_in": [JOY_BUTTON_X],
+		"jib_out": [JOY_BUTTON_LEFT_SHOULDER], "jib_in": [JOY_BUTTON_RIGHT_SHOULDER],
+		"board_up": [JOY_BUTTON_DPAD_UP], "board_down": [JOY_BUTTON_DPAD_DOWN],
+		"vang_ease": [JOY_BUTTON_DPAD_LEFT], "vang_on": [JOY_BUTTON_DPAD_RIGHT],
+		"coach": [JOY_BUTTON_TOUCHPAD], "help": [JOY_BUTTON_BACK], "pause": [JOY_BUTTON_START],
+		"warp": [JOY_BUTTON_LEFT_STICK], "map": [JOY_BUTTON_RIGHT_STICK],
+	}
+	for action: String in pad_buttons:
+		for btn in pad_buttons[action]:
+			var ev := InputEventJoypadButton.new()
+			ev.button_index = btn
+			ev.device = -1
+			InputMap.action_add_event(action, ev)
+	# Sticks and triggers, as analogue actions with a small deadzone: strength rises from 0 at
+	# the deadzone to 1 at full travel.
+	var pad_axes := {
+		"pad_tiller_port": [JOY_AXIS_LEFT_X, -1.0], "pad_tiller_stbd": [JOY_AXIS_LEFT_X, 1.0],
+		"pad_sheet_in": [JOY_AXIS_TRIGGER_RIGHT, 1.0], "pad_sheet_out": [JOY_AXIS_TRIGGER_LEFT, 1.0],
+		"pad_look_left": [JOY_AXIS_RIGHT_X, -1.0], "pad_look_right": [JOY_AXIS_RIGHT_X, 1.0],
+		"pad_look_up": [JOY_AXIS_RIGHT_Y, -1.0], "pad_look_down": [JOY_AXIS_RIGHT_Y, 1.0],
+	}
+	for action: String in pad_axes:
+		if not InputMap.has_action(action):
+			InputMap.add_action(action, 0.12)
+		var ev := InputEventJoypadMotion.new()
+		ev.axis = pad_axes[action][0]
+		ev.axis_value = pad_axes[action][1]
+		ev.device = -1
+		InputMap.action_add_event(action, ev)
+
+
+## The HUD and help show pad controls once you use the pad, and keys once you use the keys.
+func _input(ev: InputEvent) -> void:
+	if hud == null:
+		return
+	if ev is InputEventJoypadButton or (ev is InputEventJoypadMotion and absf((ev as InputEventJoypadMotion).axis_value) > 0.4):
+		hud.pad = true
+	elif ev is InputEventKey or ev is InputEventMouseButton:
+		hud.pad = false
 
 
 func _record_tracks() -> void:

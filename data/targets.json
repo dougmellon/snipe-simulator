@@ -1,0 +1,109 @@
+{
+  "about": "Target numbers the tests check the sim against, split into wind bins and into time bins around moves. Every target names its source. 'measured' targets come from a real Snipe and fail the tests when the sim misses them. 'model check' targets test the sim against itself and also fail. 'first principles' and 'estimate' targets only warn, because nobody has checked them on the water yet. null means there is no target yet. A target given for 'all' applies to every wind bin.",
+  "sources": {
+    "measured": "Recorded on a real Snipe. Name the date, place, wind and crew weight in the note.",
+    "model check": "The sim checked against itself, such as speed changing smoothly with angle.",
+    "first principles": "Worked out from physics or the boat's dimensions.",
+    "estimate": "General dinghy figures or coaching rules of thumb, not Snipe measurements."
+  },
+  "boat_length_m": 4.72,
+  "wind_bins": [
+    {"name": "light", "tws_kn": [4, 8], "test_kn": 6},
+    {"name": "medium", "tws_kn": [8, 12], "test_kn": 10},
+    {"name": "fresh", "tws_kn": [12, 16], "test_kn": 14},
+    {"name": "heavy", "tws_kn": [16, 20], "test_kn": 18}
+  ],
+  "polar": {
+    "sectors_deg": {"upwind": [0, 70], "reach": [70, 120], "downwind": [120, 180]},
+    "steady_skip_s": [-10, 20],
+    "about_steady": "Session tables count only steady sailing: samples from 10 s before to 20 s after any tack, gybe or rounding are left out.",
+    "upwind_twa_deg": {
+      "all": [38, 46],
+      "source": "estimate",
+      "note": "Dinghies usually tack through 80 to 90 degrees. No Snipe figure found."
+    },
+    "upwind_vmg_kn": {
+      "all": null,
+      "source": null,
+      "note": "No published Snipe polar found (searched Nov 2026). Needs measured data."
+    },
+    "downwind_vmg_kn": {
+      "all": null,
+      "source": null,
+      "note": "Needs measured data. Snipes run wing and wing with the whisker pole; the sim models it since 17 Nov 2026 (the crew sets it past 158 degrees true), but its gain is an estimate."
+    },
+    "max_regain_kn": {
+      "all": [0.0, 0.05],
+      "source": "model check",
+      "note": "Between 40 and 170 degrees speed should rise to one peak on a reach and fall away after it. Once speed has started to drop, it shouldn't pick up again by more than this from one 10 degree step to the next. A pick-up means a settings switch, not physics. The old rig switch at 109 degrees made speed pick up 0.6 kn at 110 degrees in 18 kn."
+    }
+  },
+  "moves": {
+    "about": "Time bins are seconds from the moment of the move: head to wind for a tack, dead downwind for a gybe. The baseline bins are the steady sailing the other bins are scored against: the average of 20-10 s before and 20-30 s after, so tacking on a wind shift isn't counted as a gain or a loss. Loss is how far behind a boat that kept sailing at the baseline VMG she ends up.",
+    "time_bins_s": [[-20, -10], [-10, -5], [-5, 0], [0, 5], [5, 10], [10, 20], [20, 30]],
+    "baseline_bins": [0, 6],
+    "tack": {
+      "loss_boat_lengths": {
+        "all": [0.5, 2.5],
+        "source": "estimate",
+        "note": "Coaching rule of thumb that a good dinghy tack costs about a boat length. Not measured on a Snipe."
+      },
+      "min_speed_ratio": {
+        "all": null,
+        "source": null,
+        "note": "Lowest speed in the tack as a fraction of baseline speed. Needs measured data."
+      },
+      "duration_s": {
+        "all": null,
+        "source": null,
+        "note": "Time spent closer to the wind than close-hauled. Needs measured data."
+      }
+    },
+    "rounding": {
+      "about": "Seconds from when the boat has gone round the mark (or through the gate). Each bin is scored against the boat's own steady VMG for that leg's sector (upwind, reach or downwind) in that wind bin, from her steady-sailing table, until measured VMG targets exist. Upwind and downwind use VMG to the wind; reaches use VMC to the mark. Tacks and gybes inside the window count as part of the rounding.",
+      "time_bins_s": [[-20, -10], [-10, 0], [0, 10], [10, 20]],
+      "loss_boat_lengths": {
+        "all": null,
+        "source": null,
+        "note": "Needs measured data."
+      }
+    },
+    "start": {
+      "about": "Seconds from the starting signal. Loss is how far behind she is 30 s after the gun compared with a boat that crossed the line at the gun and sailed at her own steady upwind VMG, measured from 30 to 60 s after the gun.",
+      "time_bins_s": [[-30, -10], [-10, 0], [0, 10], [10, 30]],
+      "baseline_s": [30, 60],
+      "behind_line_m": {
+        "all": null,
+        "source": null,
+        "note": "Distance of the bow behind the line at the gun. Needs measured data."
+      },
+      "speed_ratio_at_gun": {
+        "all": null,
+        "source": null,
+        "note": "Speed at the gun as a fraction of steady upwind speed. Needs measured data."
+      },
+      "loss_boat_lengths": {
+        "all": null,
+        "source": null,
+        "note": "Needs measured data."
+      }
+    },
+    "gybe": {
+      "loss_boat_lengths": {
+        "all": null,
+        "source": null,
+        "note": "Needs measured data."
+      },
+      "min_speed_ratio": {
+        "all": null,
+        "source": null,
+        "note": "Needs measured data."
+      },
+      "duration_s": {
+        "all": null,
+        "source": null,
+        "note": "Time spent deeper than the baseline angle. Needs measured data."
+      }
+    }
+  }
+}

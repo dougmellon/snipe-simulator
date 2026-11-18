@@ -11,6 +11,14 @@ const SPEEDS := [["Light (6 kn)", 6.0], ["Medium (10 kn)", 10.0], ["Fresh (14 kn
 const GUSTS := [["Steady", 0.15], ["Shifty", 0.5], ["Puffy", 0.9]]
 const SKILLS := [["Novice", 0.55], ["Club racer", 0.78], ["Sharp", 0.95]]
 const STARTS := [["Check-in, 5:00 to go", -300.0], ["Attention signal, 3:00", -181.0], ["1 minute to go", -65.0]]
+# Rig settings done ashore (North Sails Snipe tuning guide numbers marked "guide"; the rest are
+# steps either side of them). Rake has no number in the guide: it's relative to a base rake
+# that gives a light weather helm hiked flat in 10 kn.
+const MASTS := [["Soft", 0], ["Medium", 1], ["Stiff", 2]]
+const SPREADER_LENS := [["16 1/4 in", 16.25], ["16 1/2 in", 16.5], ["16 3/4 in (guide)", 16.75], ["17 in", 17.0], ["17 1/4 in", 17.25]]
+const SPREADER_TIPS := [["28 3/4 in", 28.75], ["29 in", 29.0], ["29 1/4 in (guide)", 29.25], ["29 1/2 in", 29.5], ["29 3/4 in (guide, heavy air)", 29.75]]
+const SHROUDS := [["70 in (guide: furthest forward)", 70.0], ["70 1/2 in", 70.5], ["71 in", 71.0], ["71 1/2 in", 71.5], ["72 in", 72.0]]
+const RAKES := [["4 in forward", -4.0], ["2 in forward", -2.0], ["Base", 0.0], ["2 in aft", 2.0], ["4 in aft", 4.0]]
 
 var controls := {}
 var cfg_file := ConfigFile.new()
@@ -75,10 +83,10 @@ func _ready() -> void:
 	v.add_child(assists)
 	_check(assists, "auto_jib", "Crew trims the jib", true)
 	_check(assists, "auto_hike", "Crew hikes", true)
-	_check(assists, "auto_rig", "Crew sets vang / outhaul", false)
+	_check(assists, "auto_rig", "Crew sets the rig", false)
 	_check(assists, "auto_main", "Auto main", false)
 	var note := Label.new()
-	note.text = "Simulator: you helm and trim the main, and read the telltales, the windex and the water.
+	note.text = "Simulator: you helm and trim the main, and read the telltales, the shroud yarns and the water.
 No speedo or wind instruments (Snipe class rules allow a compass and a watch); I shows coach data.
 Assisted: everything automatic except helm and main, full instruments and map aids."
 	note.add_theme_font_size_override("font_size", 13)
@@ -99,6 +107,8 @@ Assisted: everything automatic except helm and main, full instruments and map ai
 	buttons.add_child(quit)
 	go.grab_focus.call_deferred()
 
+	_build_rig_panel(sb)
+
 	var credit := Label.new()
 	credit.text = "Shoreline © OpenStreetMap contributors (ODbL). Mark positions approximate, from the club's reference map."
 	credit.add_theme_font_size_override("font_size", 12)
@@ -110,6 +120,44 @@ Assisted: everything automatic except helm and main, full instruments and map ai
 	add_child(credit)
 
 
+## The rig as set up ashore: mast, spreaders, shrouds and rake. Beside the main panel.
+func _build_rig_panel(sb: StyleBox) -> void:
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", sb)
+	panel.position = Vector2(760, 40)
+	panel.custom_minimum_size = Vector2(430, 0)
+	add_child(panel)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 8)
+	panel.add_child(v)
+	var title := Label.new()
+	title.text = "Rig, set ashore"
+	title.add_theme_font_size_override("font_size", 24)
+	title.add_theme_color_override("font_color", Color(1.0, 0.62, 0.2))
+	v.add_child(title)
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 14)
+	grid.add_theme_constant_override("v_separation", 8)
+	v.add_child(grid)
+	_option(grid, "rig_mast", "Mast", MASTS.map(func(s): return s[0]), 1, 210)
+	_option(grid, "rig_spreader", "Spreaders, mast to shroud", SPREADER_LENS.map(func(s): return s[0]), 2, 210)
+	_option(grid, "rig_tips", "Spreaders, tip to tip", SPREADER_TIPS.map(func(s): return s[0]), 2, 210)
+	_option(grid, "rig_shrouds", "Shrouds, aft of the stem", SHROUDS.map(func(s): return s[0]), 0, 210)
+	_option(grid, "rig_rake", "Mast rake at the masthead", RAKES.map(func(s): return s[0]), 2, 210)
+	var note := Label.new()
+	note.text = "Numbers marked guide are from the North Sails Snipe tuning guide.
+More tip to tip, or shrouds further aft, makes a stiffer mast (more
+power held in a breeze). Longer spreaders push the middle of the mast
+to leeward, shorter ones let it go to windward. The guide gives no rake:
+set it so the helm is neutral with the boat hiked flat (rake aft for
+lee helm, forward for weather helm). Base is a light weather helm in
+10 kn here. The rest you set afloat: Y shows the rig panel."
+	note.add_theme_font_size_override("font_size", 13)
+	note.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
+	v.add_child(note)
+
+
 func _label(parent: Control, text: String) -> void:
 	var l := Label.new()
 	l.text = text
@@ -117,13 +165,13 @@ func _label(parent: Control, text: String) -> void:
 	parent.add_child(l)
 
 
-func _option(parent: Control, key: String, text: String, items: Array, default: int) -> void:
+func _option(parent: Control, key: String, text: String, items: Array, default: int, width := 290) -> void:
 	_label(parent, text)
 	var o := OptionButton.new()
 	for it in items:
 		o.add_item(str(it))
 	o.selected = clampi(cfg_file.get_value("menu", key, default), 0, items.size() - 1)
-	o.custom_minimum_size = Vector2(290, 0)
+	o.custom_minimum_size = Vector2(width, 0)
 	parent.add_child(o)
 	controls[key] = o
 
@@ -206,6 +254,13 @@ func build_cfg() -> Dictionary:
 		"player_sail": sail,
 		"assist": assist,
 		"seed": rng.randi(),
+		"rig": {
+			"mast": MASTS[controls["rig_mast"].selected][1],
+			"spreader_len": SPREADER_LENS[controls["rig_spreader"].selected][1],
+			"spreader_tips": SPREADER_TIPS[controls["rig_tips"].selected][1],
+			"shroud_pos": SHROUDS[controls["rig_shrouds"].selected][1],
+			"rake": RAKES[controls["rig_rake"].selected][1],
+		},
 	}
 
 

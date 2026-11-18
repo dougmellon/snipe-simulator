@@ -113,7 +113,7 @@ func _place_camera() -> void:
 			cam.position = bp - fwd * 10.5 + Vector3(0, 4.2, 0) - stb * 2.0
 			cam.look_at(bp + fwd * 4.0 + Vector3(0, 2.2, 0))
 		"close":
-			# The whole rig from the windward bow quarter: crew, telltales, windex.
+			# The whole rig from the windward bow quarter: telltales.
 			var side := 1.0 if b.crew_y >= 0.0 else -1.0
 			cam.position = bp + stb * side * 5.2 + fwd * 4.2 + Vector3(0, 2.6, 0)
 			cam.look_at(bp + Vector3(0, 3.1, 0) - fwd * 0.6)
@@ -125,13 +125,33 @@ func _place_camera() -> void:
 			# Skipper's eye on the windward side deck, looking forward at the jib luff.
 			var v: Node3D = views[bi].pivot
 			var side := 1.0 if b.crew_y >= 0.0 else -1.0
-			views[bi].set_crew_visible(false, true)
-			cam.position = v.global_transform * Vector3(side * 0.5, 1.05, 1.4)
-			cam.look_at(v.global_transform * Vector3(0.0, 2.1, -2.0))
+			cam.position = v.global_transform * Vector3(side * 0.5, 1.05, -BoatView.SKIPPER_X)
+			cam.look_at(v.global_transform * Vector3(0.0, 2.1, -BoatView.SKIPPER_X - 3.4))
 		"leeward":
 			var side := -1.0 if b.crew_y >= 0.0 else 1.0
 			cam.position = bp + stb * side * 5.5 + fwd * 1.5 + Vector3(0, 2.0, 0)
 			cam.look_at(bp + Vector3(0, 2.2, 0))
+		# Close looks at the boat model itself.
+		"profile":
+			cam.position = bp + stb * 6.5 + Vector3(0, 0.9, 0)
+			cam.look_at(bp + Vector3(0, 0.55, 0))
+		"quarter":
+			var side := 1.0 if b.crew_y >= 0.0 else -1.0
+			cam.position = bp - fwd * 4.2 + stb * side * 2.6 + Vector3(0, 2.6, 0)
+			cam.look_at(bp + fwd * 0.4 + Vector3(0, 0.3, 0))
+		"bowq":
+			var side := -1.0 if b.crew_y >= 0.0 else 1.0
+			cam.position = bp + fwd * 4.6 + stb * side * 2.8 + Vector3(0, 1.0, 0)
+			cam.look_at(bp + Vector3(0, 0.6, 0))
+		"stern":
+			cam.position = bp - fwd * 4.5 + Vector3(0, 0.8, 0)
+			cam.look_at(bp + Vector3(0, 0.5, 0))
+		"top":
+			cam.position = bp + Vector3(0, 7.0, 0) - fwd * 0.4
+			cam.look_at(bp, fwd)
+		"cockpit":
+			cam.position = bp - fwd * 1.6 + stb * 0.9 + Vector3(0, 1.9, 0)
+			cam.look_at(bp + fwd * 0.6 - stb * 0.1 + Vector3(0, 0.2, 0))
 		"high":
 			cam.position = Vector3(1050.0, 600.0, 1500.0)
 			cam.look_at(Lake.to_3d(Vector2(-700.0, 700.0)))
@@ -155,8 +175,15 @@ func _process(delta: float) -> void:
 	frames += 1
 	wind.update(delta)
 	world.update_water(t, wind.mean_from(), wind.base_speed, wind.shader_puffs())
+	# Cut the hulls out of the water, as main.gd does, so waves don't show inside cockpits.
+	var hulls := PackedVector4Array()
+	var speeds := PackedFloat32Array()
 	for i in views.size():
 		views[i].sync(sims[i], t)
+		hulls.append(Vector4(sims[i].pos.x, sims[i].pos.y, sims[i].heading, sims[i].heel))
+		speeds.append(sims[i].u)
+	world.update_hulls(hulls)
+	world.update_hull_speeds(speeds)
 	_place_camera()
 	if args.has("perf"):
 		if t > 3.0:

@@ -2,7 +2,7 @@ extends RefCounted
 ## AI skipper. Reaches back and forth below the line before the start and times a run at it,
 ## sails the course with laylines and wind shifts, rounds marks to port, gives way when Part 2
 ## says it must, takes its penalty turns, and keeps off the shore, the marks and the RC boat.
-## Trim and hiking use the same assists the player can switch on.
+## Trim, hiking, the rig and the whisker pole use the same crew the player can switch on.
 
 const Race := preload("res://scripts/race.gd")
 
@@ -40,6 +40,7 @@ var give_t := 0.0
 var plan_t := 0.0
 var plan_ease := 0.0
 var plan_free := false
+var pole_down := false  # the crew is to take the whisker pole down (or leave it down)
 var debug := ""
 
 
@@ -77,6 +78,11 @@ func _plan(b, e, race, lake, wind: Vector2, others: Array, dt: float) -> void:
 
 	var ease := 0.0
 	var free_heading := false  # true when the heading must not be bent by avoidance
+	# No pole before the start, in penalty turns, when unsticking, or coming up to a mark (the
+	# crew takes it down before the rounding, as at a leeward mark).
+	pole_down = mode != "race" or e.penalty_turns > 0 or unstick_t > 0.0
+	if mode == "race" and e.started and race.is_mark(e.leg) and b.pos.distance_to(race.point_of(e.leg)) < 35.0:
+		pole_down = true
 	if unstick_t > 0.0:
 		unstick_t -= dt
 		want = unstick_h
@@ -195,6 +201,7 @@ func _steer_and_trim(b, wf: float, dt: float) -> void:
 	if trim_t <= 0.0:
 		trim_t = 0.25
 		b.auto_rig()
+		b.crew_pole(pole_down)
 		var best: Vector2 = b.best_sheets()
 		var e_sk := (1.0 - skill) * 0.25
 		sheet_target = Vector2(clampf(best.x + rng.randf_range(-e_sk, e_sk), 0.0, 1.0), clampf(best.y + rng.randf_range(-e_sk, e_sk), 0.0, 1.0))
@@ -203,7 +210,6 @@ func _steer_and_trim(b, wf: float, dt: float) -> void:
 	b.main_sheet = move_toward(b.main_sheet, ms, dt * 1.5)
 	b.jib_sheet = move_toward(b.jib_sheet, js, dt * 2.0)
 	b.hike = lerpf(b.hike, b.auto_hike(4.0), clampf(dt * 3.0, 0.0, 1.0))
-	b.board = 1.0 if absf(b.twa) < 1.9 else 0.5
 	if b.capsized and b.capsize_t > 3.0:
 		b.right_now()
 

@@ -106,6 +106,14 @@ func _make_environment() -> void:
 	env.fog_aerial_perspective = 0.35
 	env.fog_sky_affect = 0.0
 	env.fog_sun_scatter = 0.08
+	# Ambient occlusion at boat scale: contact shadow in the cockpits, under rubrails and round
+	# the fittings, so the boats don't look flat-lit.
+	env.ssao_enabled = true
+	env.ssao_radius = 0.45
+	env.ssao_intensity = 1.6
+	env.ssao_power = 1.4
+	env.ssao_detail = 0.6
+	env.ssao_light_affect = 0.15
 	# Screen-space reflections put the boats, sails and committee boat in the water.
 	env.ssr_enabled = true
 	env.ssr_max_steps = 72

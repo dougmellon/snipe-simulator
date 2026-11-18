@@ -124,13 +124,59 @@ float puff_field(vec2 p) {
 
 // --- Hulls ------------------------------------------------------------------------------------
 
-// Half-breadth of the Snipe at the sheer, station x forward of the CG (matches boat_view.gd).
+// The Snipe's lines at station x forward of the CG: copies of sheer_hb, sheer_h, chine_hb,
+// chine_h, keel_h and _run (hull_run here) in boat_view.gd (change them together). The bow is full in plan and
+// closes into a rounded tip; the chine and keel run up into a raked stem.
 float sheer_hb(float x) {
 	if (x <= 0.35) {
-		return 0.76 - 0.028 * (0.35 - x) * (0.35 - x);
+		return 0.76 - 0.02 * (0.35 - x) * (0.35 - x);
 	}
 	float t = clamp((x - 0.35) / 2.1, 0.0, 1.0);
-	return 0.76 * (1.0 - pow(t, 1.6));
+	float w = 1.0 - t * t;
+	return 0.76 * sqrt(w) * pow((w + 0.1) / 1.1, 0.25);
+}
+
+float sheer_h(float x) {
+	return x > 0.0 ? 0.33 + 0.034 * x * x : 0.33 + 0.006 * x * x;
+}
+
+float chine_hb(float x) {
+	if (x <= 0.3) {
+		return sheer_hb(x) * 0.81;
+	}
+	float t = clamp((x - 0.3) / 2.15, 0.0, 1.0);
+	return 0.75995 * 0.81 * (1.0 - pow(t, 1.35));
+}
+
+// The run aft: flat to x0, curving up to x1, then straight, rising s per metre.
+float hull_run(float x, float x0, float x1, float s) {
+	if (x >= x0) {
+		return 0.0;
+	}
+	float d = x0 - x1;
+	if (x >= x1) {
+		return s * (x0 - x) * (x0 - x) / (2.0 * d);
+	}
+	return s * (x1 - x + d * 0.5);
+}
+
+float chine_h(float x) {
+	float h = -0.05;
+	if (x > 0.6) {
+		h += 0.05 * (x - 0.6) * (x - 0.6);
+	}
+	h += 0.25 * pow(smoothstep(2.15, 2.45, x), 1.6);
+	return h + hull_run(x, 0.3, -0.6, 0.07);
+}
+
+float keel_h(float x) {
+	float h = -0.15;
+	if (x > 0.6) {
+		h += 0.0776 * (x - 0.6) * (x - 0.6);
+	}
+	h += 0.19 * pow(smoothstep(2.15, 2.45, x), 1.6);
+	h += hull_run(x, 0.6, -0.34, 0.075);
+	return min(h, chine_h(x) - 0.03);
 }
 
 // Inside a (heeled) hull, and the bow wave's foam just outside the forward half of one. A point
@@ -153,13 +199,16 @@ bool hull_test(vec2 p, out float bow_foam) {
 		}
 		float ly = s * cos(h.w);
 		float lh = s * sin(h.w);
-		float top = sheer_hb(x);
-		float chine = top * 0.81;
-		float w = mix(chine, top, clamp((lh + 0.05) / 0.39, 0.0, 1.0));
-		if (lh < -0.05) {
-			w = chine * clamp((lh + 0.18) / 0.13, 0.0, 1.0);
-		}
-		if (lh <= 0.33 && abs(ly) < w * 0.97 && x < 2.4) {
+		// The hull's half-breadth at that height: the bottom panel from the keel to the chine,
+		// then the topside out to the sheer.
+		float kh = keel_h(x);
+		float cht = chine_h(x);
+		float sht = sheer_h(x);
+		float cb = chine_hb(x);
+		float w = lh < cht
+			? cb * clamp((lh - kh) / max(cht - kh, 0.001), 0.0, 1.0)
+			: mix(cb, sheer_hb(x), clamp((lh - cht) / max(sht - cht, 0.001), 0.0, 1.0));
+		if (lh <= sht && abs(ly) < w * 0.97 && x < 2.45) {
 			return true;
 		}
 		// The bow wave: a curl of white water peeling off the stem and along the forward topsides.

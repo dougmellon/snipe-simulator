@@ -13,6 +13,7 @@ const BOAT_R := 0.6
 const MARK_R := 0.45
 const PIN_R := 0.6
 const RC_R := 1.3
+const SEPARATE := 0.3  # share of an overlap with a boat, mark or the RC boat undone each step
 const MAX_FLEET := 10
 const AI_NAMES := ["Sandpiper", "Osprey", "Pelican", "Heron", "Kestrel", "Merlin", "Plover", "Avocet", "Tern", "Grebe", "Killdeer", "Curlew"]
 
@@ -25,6 +26,10 @@ var names: Array = []
 var sails: Array = []
 var player := -1
 var assist := {"jib": true, "hike": true, "main": false, "rig": false}
+## Rig controls the player has taken over from the crew (control name -> true): the crew's rig
+## assist leaves them alone until the pause menu hands the rig back. "pole" is the whisker pole,
+## which the crew handles while it has the jib.
+var rig_manual := {}
 var time := 0.0
 var rng := RandomNumberGenerator.new()
 var local := []        # per boat: Vector2(from_deg, speed) at the boat, refreshed at 30 Hz
@@ -33,6 +38,7 @@ var assist_t := 0.0
 var events: Array = []  # {"type": "aground"|"capsize"|"contact"|"mark", "boat": i, ...}
 var aground_t := []
 var chop_t := []
+var recorder  # optional scripts/recorder.gd; sees every step and every event
 
 
 ## cfg keys: wind_from, wind_kn, gust, ai (count), skill, course (type), seed, start (clock),
@@ -88,6 +94,12 @@ func setup(cfg: Dictionary, lake_ref = null) -> void:
 			names.append(nm)
 			sails.append(str(frng.randi_range(28000, 32999)))
 	assist = cfg.get("assist", assist).duplicate()
+	rig_manual = {}
+	# The player's ashore rig from the start menu (the AI boats use the guide's numbers).
+	if with_player and cfg.has("rig"):
+		var rig: Dictionary = cfg["rig"]
+		for k: String in rig:
+			boats[0].set(k, rig[k])
 	local.resize(boats.size())
 	aground_t.resize(boats.size())
 	aground_t.fill(-100.0)
@@ -126,15 +138,36 @@ func step(dt: float) -> void:
 		var was_capsized: bool = b.capsized
 		b.step(dt, Wind.from_to_vector(w.x, w.y))
 		if b.just_capsized and not was_capsized:
-			events.append({"type": "capsize", "boat": i})
+			_event({"type": "capsize", "boat": i})
 	_collide()
 	if race != null:
 		race.update(dt, wind.mean_from())
+	if recorder != null:
+		recorder.tick(self)
+
+
+func _event(d: Dictionary) -> void:
+	events.append(d)
+	if recorder != null:
+		recorder.event(time, d)
+
+
+## Turns a crew assist on or off. Turning one on gives back the controls it covers.
+func set_assist(key: String, on: bool) -> void:
+	assist[key] = on
+	if on and key == "rig":
+		for k: String in rig_manual.keys():
+			if k != "pole":
+				rig_manual.erase(k)
+	if on and key == "jib":
+		rig_manual.erase("pole")
 
 
 func _player_assists(b, do_assist: bool, dt: float) -> void:
 	if do_assist and assist.get("rig", false):
-		b.auto_rig()
+		b.auto_rig(rig_manual)
+	if do_assist and assist["jib"] and not rig_manual.has("pole"):
+		b.crew_pole(false)
 	if do_assist and (assist["jib"] or assist["main"]):
 		var best: Vector2 = b.best_sheets()
 		if assist["jib"]:
@@ -197,7 +230,8 @@ func _collide() -> void:
 			if dist >= BOAT_R * 2.0:
 				continue
 			var nrm: Vector2 = d / dist if dist > 1e-4 else (b.pos - a.pos).normalized()
-			var push := (BOAT_R * 2.0 - dist) * 0.5
+			# Ease them apart over a few steps rather than in one: a one-step shove shows as a snap.
+			var push := (BOAT_R * 2.0 - dist) * 0.5 * SEPARATE
 			a.pos -= nrm * push
 			b.pos += nrm * push
 			var va: Vector2 = a.velocity()
@@ -208,7 +242,7 @@ func _collide() -> void:
 				vb -= nrm * rel * 0.5
 				_set_velocity(a, va)
 				_set_velocity(b, vb)
-			events.append({"type": "contact", "boat": i, "other": j})
+			_event({"type": "contact", "boat": i, "other": j})
 			if race != null:
 				race.report_contact(i, j, wind.mean_from())
 	for i in n:
@@ -233,12 +267,12 @@ func _touch_marks(i: int, b) -> void:
 		var r: float = h[2] + BOAT_R
 		if dist < r:
 			var nrm: Vector2 = d / dist if dist > 1e-4 else (b.pos - c).normalized()
-			b.pos += nrm * (r - dist)
+			b.pos += nrm * (r - dist) * SEPARATE
 			var v: Vector2 = b.velocity()
 			var vn := v.dot(nrm)
 			if vn < 0.0:
 				_set_velocity(b, v - nrm * vn)
-			events.append({"type": "mark", "boat": i, "mark": h[0]})
+			_event({"type": "mark", "boat": i, "mark": h[0]})
 			if race != null:
 				race.report_mark_touch(i, h[0])
 	if race != null:
@@ -252,12 +286,12 @@ func _touch_marks(i: int, b) -> void:
 			var dist := d.length()
 			if dist < RC_R + BOAT_R:
 				var nrm: Vector2 = d / dist if dist > 1e-4 else (b.pos - race.rc_pos).normalized()
-				b.pos += nrm * (RC_R + BOAT_R - dist)
+				b.pos += nrm * (RC_R + BOAT_R - dist) * SEPARATE
 				var v: Vector2 = b.velocity()
 				var vn := v.dot(nrm)
 				if vn < 0.0:
 					_set_velocity(b, v - nrm * vn)
-				events.append({"type": "mark", "boat": i, "mark": "RC"})
+				_event({"type": "mark", "boat": i, "mark": "RC"})
 				race.report_mark_touch(i, "RC")
 
 
@@ -277,7 +311,7 @@ func _touch_shore(i: int, b) -> void:
 			b.aground = true
 	if b.aground and time - aground_t[i] > 5.0:
 		aground_t[i] = time
-		events.append({"type": "aground", "boat": i})
+		_event({"type": "aground", "boat": i})
 
 
 static func _set_velocity(b, v: Vector2) -> void:

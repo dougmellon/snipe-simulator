@@ -3,6 +3,7 @@ extends Control
 ## telltales, messages, big banners, the leaderboard and the help card.
 
 const Race := preload("res://scripts/race.gd")
+const BoatSimRef := preload("res://scripts/boat_sim.gd")
 const KN := 0.514444
 
 var fleet
@@ -17,6 +18,11 @@ var ideal := Vector2(-1, -1)  # ideal main/jib sheet for the player's boat
 var sim := true    # simulator: compass and watch only
 var coach := false # show the coach numbers anyway
 var tiller_mode := true  # the helm gauge shows where the tiller handle is
+var pad := false   # show game pad controls instead of keys (set by main.gd from the last input)
+var show_tune := false  # the rig tune panel (Y)
+var _helm_avg := 0.0    # smoothed rudder angle she needs, + = weather helm (degrees)
+var _guide := {}        # the crew's settings for this wind and angle, for the coach column
+var _guide_t := 0.0
 var _font: Font
 var _bold: Font
 
@@ -66,6 +72,8 @@ func _draw() -> void:
 	_draw_race(b, race, e)
 	_draw_instruments(b, race, e)
 	_draw_trim(b)
+	if show_tune:
+		_draw_tune(b)
 	_draw_messages()
 	if banner_t > 0.0:
 		var a := clampf(banner_t, 0.0, 1.0)
@@ -191,8 +199,8 @@ func _flag(r: Rect2, f: String) -> void:
 
 # --- Instruments (bottom left) --------------------------------------------------------
 
-## Simulator: what a Snipe sailor actually has, a tactical compass and a feel for the heel.
-## Coach mode (or Assisted) adds the speedo, wind and VMG numbers.
+## Simulator: a tactical compass with boat speed (as a GPS unit shows them) and a feel for the
+## heel. Coach mode (or Assisted) adds wind and VMG numbers.
 func _draw_instruments(b, race, e) -> void:
 	var full := not sim or coach
 	var r := Rect2(16, size.y - 196, 420, 180)
@@ -219,10 +227,12 @@ func _draw_instruments(b, race, e) -> void:
 		# Tactical compass: big heading digits, the way a Velocitek or Tacktick shows it.
 		_text(p + Vector2(14, 64), "%03d" % int(hdg), 58, Color.WHITE, -1, HORIZONTAL_ALIGNMENT_LEFT, true)
 		_text(p + Vector2(16, 86), "compass", 14, DIM)
+		_text(p + Vector2(120, 64), "%.1f" % (b.speed() / KN), 34, Color.WHITE, -1, HORIZONTAL_ALIGNMENT_LEFT, true)
+		_text(p + Vector2(122, 86), "kn", 14, DIM)
 		_text(p + Vector2(190, 40), "%s tack" % tack, 18, Color.WHITE)
-		_text(p + Vector2(190, 64), "Trim by the telltales and windex;", 14, DIM)
+		_text(p + Vector2(190, 64), "Trim by the telltales and shroud yarns;", 14, DIM)
 		_text(p + Vector2(190, 84), "puffs show as dark water.", 14, DIM)
-		_text(p + Vector2(190, 104), "I: coach numbers", 14, Color(1, 1, 1, 0.4))
+		_text(p + Vector2(190, 104), _k("I: coach numbers", "Touchpad: coach numbers"), 14, Color(1, 1, 1, 0.4))
 	# Heel: on the water you feel it; here it gets a gauge.
 	var c := p + Vector2(70, 150)
 	var rad := 46.0
@@ -237,7 +247,7 @@ func _draw_instruments(b, race, e) -> void:
 	_text(c + Vector2(-40, 22), "heel %d°" % int(absf(rad_to_deg(heel))), 13, DIM, 80, HORIZONTAL_ALIGNMENT_CENTER)
 	var flags := []
 	if b.capsized:
-		flags.append("CAPSIZED (R: crew rights her)" if b.capsize_t >= b.RIGHT_MIN else "CAPSIZED, crew swimming to the board")
+		flags.append(_k("CAPSIZED (R: crew rights her)", "CAPSIZED (Triangle: crew rights her)") if b.capsize_t >= b.RIGHT_MIN else "CAPSIZED, crew swimming to the board")
 	elif b.water_in > 0.05:
 		flags.append("bailing %d%%" % int(b.water_in * 100.0))
 	if b.aground:
@@ -246,7 +256,7 @@ func _draw_instruments(b, race, e) -> void:
 		flags.append("TIME x%d" % warp)
 	flags.append("cam: " + cam_name)
 	_text(p + Vector2(150, 140), "   ".join(flags), 14, WARN if b.capsized or b.aground else DIM)
-	_text(p + Vector2(150, 162), "F1 help   M chart   Tab results   C camera", 13, Color(1, 1, 1, 0.4))
+	_text(p + Vector2(150, 162), _k("F1 help   Y rig   M chart   Tab results   C cam", "Create help   R3 chart   Cross cam"), 13, Color(1, 1, 1, 0.4))
 
 
 # --- Trim (bottom centre) --------------------------------------------------------------
@@ -258,10 +268,10 @@ func _draw_trim(b) -> void:
 	_panel(r)
 	var p := r.position + Vector2(14, 26)
 	var assist: Dictionary = fleet.assist
-	_bar(p, "MAIN", b.main_sheet, b.main_alpha, b.awa, ideal.x if full else -1.0, assist["main"], "W/S", full)
-	_bar(p + Vector2(0, 30), "JIB", b.jib_sheet, b.jib_alpha, b.awa, ideal.y if full else -1.0, assist["jib"], "Q/E", full, "crew")
-	_setting(p + Vector2(0, 60), "VANG", b.vang, "Z/X", assist.get("rig", false), "slack", "hard on")
-	_setting(p + Vector2(0, 86), "OUTHAUL", b.flatten, "V/F", assist.get("rig", false), "full", "flat")
+	_bar(p, "MAIN", b.main_sheet, b.main_alpha, b.awa, ideal.x if full else -1.0, assist["main"], _k("W/S", "R2/L2"), full)
+	_bar(p + Vector2(0, 30), "JIB", b.jib_sheet, b.jib_alpha, b.awa, ideal.y if full else -1.0, assist["jib"], _k("Q/E", "L1/R1"), full, "crew")
+	_setting(p + Vector2(0, 60), "VANG", b.vang, _k("Z/X", "D-pad left/right"), _crew_has("vang"), _vang_text(b.vang))
+	_setting(p + Vector2(0, 86), "OUTHAUL", b.outhaul / b.OUTHAUL_MAX, _k("F/V", "keys F/V"), _crew_has("outhaul"), _outhaul_text(b.outhaul))
 	# Crew position.
 	var cy: float = b.crew_y
 	var q := p + Vector2(0, 116)
@@ -270,11 +280,13 @@ func _draw_trim(b) -> void:
 	draw_rect(bar, Color(1, 1, 1, 0.12))
 	draw_line(bar.position + Vector2(bar.size.x * 0.5, -3), bar.position + Vector2(bar.size.x * 0.5, 15), Color(1, 1, 1, 0.4), 1.0)
 	var cx := bar.position.x + bar.size.x * 0.5 + clampf(cy / 1.05, -1.0, 1.0) * bar.size.x * 0.5
-	draw_circle(Vector2(cx, bar.position.y + 6), 7, Color(1, 0.8, 0.3))
-	var hk := "crew" if assist["hike"] else "Shift/Ctrl"
+	# Fore and aft as in a plan view: forward is up.
+	draw_circle(Vector2(cx, bar.position.y + 6 - clampf(float(b.crew_x) / b.CREW_X_FWD, -1.0, 1.0) * 6.0), 7, Color(1, 0.8, 0.3))
+	var hk := "crew" if assist["hike"] else _k("Shift/Ctrl", "Circle/Square")
 	_text(q + Vector2(292, 4), "hike: %s" % hk, 13, DIM)
-	var board := "down" if b.board > 0.75 else ("half" if b.board > 0.25 else "up")
-	_text(q + Vector2(380, 4), "board %s (B)" % board, 13, DIM)
+	_text(q + Vector2(372, 4), "board %s (%s)" % [_board_text(b.board), _k("B", "D-pad up/down")], 13, DIM)
+	if b.pole_state != b.POLE_STOWED:
+		_text(p + Vector2(430, 64), "pole: " + _pole_text(b), 13, WARN if b.pole_busy() or b.pole_wrong_side() else DIM)
 	# Tiller.
 	var tr := Rect2(r.position + Vector2(w - 150, 118), Vector2(130, 10))
 	draw_rect(tr, Color(1, 1, 1, 0.12))
@@ -282,7 +294,7 @@ func _draw_trim(b) -> void:
 	var handle: float = -b.tiller if tiller_mode else b.tiller
 	var tx: float = tr.position.x + tr.size.x * 0.5 + handle * tr.size.x * 0.5
 	draw_rect(Rect2(tx - 3, tr.position.y - 3, 6, 16), Color(1, 1, 1))
-	_text(tr.position + Vector2(0, -8), ("TILLER  port | stbd" if tiller_mode else "HELM") + "   (Space centres)", 11, DIM)
+	_text(tr.position + Vector2(0, -8), ("TILLER  port | stbd" if tiller_mode else "HELM") + _k("   (Space centres)", "   (left stick)"), 11, DIM)
 
 
 ## One sheet bar: position (0 in, 1 eased). With `full` it also says how the sail is working.
@@ -329,13 +341,190 @@ func _bar(p: Vector2, label: String, sheet: float, alpha: float, awa: float, ide
 	_text(p + Vector2(292, 4), right, 13, col if full else DIM)
 
 
-## A rig control: 0..1 with labels at each end.
-func _setting(p: Vector2, label: String, v: float, keys: String, auto: bool, lo: String, hi: String) -> void:
+## A rig control: a 0..1 bar and its setting in words.
+func _setting(p: Vector2, label: String, v: float, keys: String, auto: bool, value: String) -> void:
 	_text(p + Vector2(0, 4), label, 13, DIM)
 	var bar := Rect2(p + Vector2(76, -4), Vector2(204, 8))
 	draw_rect(bar, Color(1, 1, 1, 0.12))
 	draw_rect(Rect2(bar.position, Vector2(bar.size.x * clampf(v, 0.0, 1.0), bar.size.y)), Color(0.7, 0.8, 0.95, 0.8))
-	_text(p + Vector2(292, 4), ("crew" if auto else keys) + "   %s .. %s" % [lo, hi], 13, DIM)
+	_text(p + Vector2(292, 4), value + "   " + ("crew" if auto else keys), 13, DIM)
+
+
+# --- Rig tune panel (Y) ----------------------------------------------------------------
+
+## True when the crew is setting this rig control (the rig assist is on and you haven't taken
+## it over); "pole" goes with the jib.
+func _crew_has(field: String) -> bool:
+	if field == "pole":
+		return fleet.assist.get("jib", false) and not fleet.rig_manual.has("pole")
+	return fleet.assist.get("rig", false) and not fleet.rig_manual.has(field)
+
+
+## Inches to the nearest eighth, the way they're marked on a Snipe: "2 1/2 in", "3/8 in".
+static func inch(x: float) -> String:
+	var e := int(round(absf(x) * 8.0))
+	var whole := e / 8
+	var frac := e % 8
+	var fs := ""
+	if frac != 0:
+		var num := frac
+		var den := 8
+		while num % 2 == 0:
+			num /= 2
+			den /= 2
+		fs = "%d/%d" % [num, den]
+	if whole == 0 and fs == "":
+		return "0 in"
+	if whole == 0:
+		return fs + " in"
+	return ("%d %s in" % [whole, fs]) if fs != "" else "%d in" % whole
+
+
+static func _outhaul_text(v: float) -> String:
+	return "at the band" if v < 0.07 else "eased " + inch(v)
+
+
+static func _cunningham_text(v: float) -> String:
+	return "loose" if v < 0.07 else inch(v) + " on"
+
+
+static func _vang_text(v: float) -> String:
+	return "slack" if v < 0.035 else "on %d/10" % int(round(v * 10.0))
+
+
+static func _traveler_text(v: float) -> String:
+	return "centred" if v < 0.07 else "down " + inch(v)
+
+
+static func _puller_text(v: float) -> String:
+	if absf(v) < 0.07:
+		return "neutral"
+	var txt := inch(v) + (" forward" if v > 0.0 else " aft")
+	for m: float in [-0.375, 0.375, 0.75, 1.0]:
+		if absf(v - m) < 0.03:
+			txt += " (mark)"
+	return txt
+
+
+static func _halyard_text(v: float) -> String:
+	return "full tension" if v < 0.07 else "eased %s of %d" % [inch(v), int(BoatSimRef.HALYARD_THROW)]
+
+
+static func _lead_text(v: float) -> String:
+	return "neutral" if absf(v) < 0.07 else inch(v) + (" forward" if v > 0.0 else " aft")
+
+
+static func _board_text(v: float) -> String:
+	if v > 0.98:
+		return "down"
+	if absf(v - 0.36) < 0.03:
+		return "raised"
+	return "moving"
+
+
+func _pole_text(b) -> String:
+	var side := "starboard" if b.pole_side > 0.0 else "port"
+	var st: int = b.pole_state
+	if st == BoatSimRef.POLE_SETTING:
+		return "crew setting it to %s" % side
+	if st == BoatSimRef.POLE_SET:
+		return ("on the wrong side after the gybe: %s to swap" % _k("G", "Triangle")) if b.pole_wrong_side() else "set to %s" % side
+	if st == BoatSimRef.POLE_STOWING:
+		return "crew stowing it"
+	if st == BoatSimRef.POLE_SWAPPING:
+		return "crew swapping it to %s" % side
+	return "stowed"
+
+
+## Every rig control with its setting in the guide's units, its keys and who has it; then what
+## you'd see looking up (mast bend, forestay sag, the sails' shape, the jib telltales, the
+## helm); in coach mode the crew's setting for this wind beside each control.
+func _draw_tune(b) -> void:
+	var full := not sim or coach
+	_guide_t -= get_process_delta_time()
+	if full and _guide_t <= 0.0:
+		_guide_t = 0.5
+		_guide = _crew_settings(b)
+	var weather := -float(b.tiller) * signf(b.awa if absf(b.awa) > 0.01 else 1.0) * rad_to_deg(b.MAX_RUDDER)
+	_helm_avg = lerpf(_helm_avg, weather, clampf(get_process_delta_time() * 0.7, 0.0, 1.0))
+	var rows := [
+		["Outhaul", _outhaul_text(b.outhaul), _k("V / F", "keys V / F"), "outhaul", _outhaul_text(_guide.get("outhaul", 0.0))],
+		["Cunningham", _cunningham_text(b.cunningham), "L / O", "cunningham", _cunningham_text(_guide.get("cunningham", 0.0))],
+		["Vang", _vang_text(b.vang), _k("Z / X", "D-pad left / right"), "vang", _vang_text(_guide.get("vang", 0.0))],
+		["Traveler", _traveler_text(b.traveler), "[ / ]", "traveler", _traveler_text(_guide.get("traveler", 0.0))],
+		["Mast at deck", _puller_text(b.puller), ", / .", "puller", _puller_text(_guide.get("puller", 0.0))],
+		["Jib halyard", _halyard_text(b.halyard), "- / =", "halyard", _halyard_text(_guide.get("halyard", 0.0))],
+		["Jib lead", _lead_text(b.jib_lead), "; / '", "jib_lead", _lead_text(_guide.get("jib_lead", 0.0))],
+		["Centreboard", _board_text(b.board), _k("B, U / N", "D-pad up / down"), "board", _board_text(_guide.get("board", 1.0))],
+		["Whisker pole", _pole_text(b), _k("G", "Triangle"), "pole", ""],
+	]
+	var r := Rect2(16, 158, 600, 26 + rows.size() * 21 + 8 * 19 + 18)
+	draw_rect(r, Color(0.02, 0.04, 0.06, 0.82))
+	var x := r.position.x + 12
+	var y := r.position.y + 22
+	_text(Vector2(x, y), "RIG", 16, ACCENT, -1, HORIZONTAL_ALIGNMENT_LEFT, true)
+	_text(Vector2(x + 44, y), "Y hides", 11, Color(1, 1, 1, 0.4))
+	_text(Vector2(x + 140, y), "setting", 12, DIM)
+	_text(Vector2(x + 330, y), "keys" if not pad else "keys (pad)", 12, DIM)
+	if full:
+		_text(Vector2(x + 440, y), "crew would set", 12, DIM)
+	y += 21
+	for row: Array in rows:
+		var crew := _crew_has(row[3])
+		_text(Vector2(x, y), row[0], 14, DIM)
+		_text(Vector2(x + 140, y), row[1], 14, Color.WHITE)
+		_text(Vector2(x + 330, y), "crew" if crew else row[2], 13, GOOD if crew else Color(1, 0.85, 0.5))
+		if full and row[4] != "":
+			_text(Vector2(x + 440, y), row[4], 13, DIM)
+		y += 21
+	# What you'd see looking up.
+	y += 6
+	var a := absf(rad_to_deg(b.jib_alphas[0])) - absf(rad_to_deg(b.jib_alphas[2]))
+	var tt := "luff telltales break evenly"
+	if b.pole_state == b.POLE_SET:
+		tt = "on the pole"
+	elif a > 1.5:
+		tt = "top telltales break first: lead forward"
+	elif a < -1.5:
+		tt = "bottom telltales break first: lead aft"
+	var batten := rad_to_deg(b.main_twist) * 0.8
+	var bt := "top batten parallel to the boom" if batten < 2.0 else "top batten open %d°" % int(round(batten))
+	var side := ""
+	if absf(b.mast_side) > 0.12:
+		side = ", middle %s to %s" % [inch(b.mast_side), "leeward" if b.mast_side > 0.0 else "windward"]
+	var helm := "neutral helm"
+	if _helm_avg > 4.0:
+		helm = "heavy weather helm"
+	elif _helm_avg > 1.0:
+		helm = "light weather helm"
+	elif _helm_avg < -1.0:
+		helm = "lee helm"
+	if full:
+		helm += " (%+.1f° of rudder)" % _helm_avg
+	for line: String in [
+		"Mast bend %s at mid-height%s. Forestay sag %s." % [inch(b.mast_bend), side, inch(b.stay_sag)],
+		"Main depth %d%% (foot %d%%, head %d%%), draft %d%% aft, %s." % [int(round(b.main_depth[1] * 100.0)), int(round(b.main_depth[0] * 100.0)), int(round(b.main_depth[2] * 100.0)), int(round(b.main_draft * 100.0)), bt],
+		"Jib depth %d%%, twist %d°, %s." % [int(round(b.jib_depth[1] * 100.0)), int(round(rad_to_deg(b.jib_twist))), tt],
+		"Helm: %s." % helm,
+		"Ashore (start menu): %s mast; spreaders %s, %s tip to tip;" % [b.MAST_NAMES[clampi(b.mast, 0, 2)], inch(b.spreader_len), inch(b.spreader_tips)],
+		"   shrouds %s aft of the stem; rake %s." % [inch(b.shroud_pos), "at the base" if absf(b.rake) < 0.07 else inch(b.rake) + (" aft" if b.rake > 0.0 else " forward") + " of the base"],
+	]:
+		_text(Vector2(x, y), line, 13, Color(1, 1, 1, 0.8))
+		y += 19
+	if pad:
+		_text(Vector2(x, y + 2), "Cunningham, traveler, mast, halyard and lead are on the keyboard.", 12, DIM)
+
+
+## The settings the crew would use right now (auto_rig on a copy of the boat).
+func _crew_settings(b) -> Dictionary:
+	var c = BoatSimRef.new()
+	for k: String in ["tws", "twa", "aws", "awa", "u", "v", "heel", "jib", "jib_sheet", "main_sheet", "mast", "pole_state", "jib_lead", "halyard", "main_load", "jib_load"]:
+		c.set(k, b.get(k))
+	c.auto_rig()
+	var out := {}
+	for k: String in ["outhaul", "cunningham", "vang", "traveler", "puller", "halyard", "jib_lead", "board"]:
+		out[k] = c.get(k)
+	return out
 
 
 # --- Messages, standings, help ---------------------------------------------------------
@@ -410,29 +599,60 @@ const HELP := [
 	["Left mouse drag", "sideways moves the tiller; draw back to pull the main in, push to ease"],
 	["W / S  or  ↑ / ↓", "pull the main in (slower as the load builds) / let it run out"],
 	["Space", "tiller back to the centreline (it stays wherever you leave it)"],
-	["Q / E", "ease / sheet the jib yourself (J gives it back to the crew)"],
+	["Q / E", "ease / sheet the jib yourself, and handle the pole (J gives them back)"],
 	["Shift / Ctrl", "hike out / move in yourself (H gives it back to the crew)"],
-	["Z / X", "vang: ease / tension (a loose vang twists the leech open)"],
-	["V / F", "outhaul + cunningham: ease for power / flatten to depower"],
-	["B", "centreboard down / half / up"],
+	["Z / X", "vang: ease / on (slack until hiking hard, then take the slack out)"],
+	["V / F", "outhaul: ease / tighten (tight upwind, eased 2-3 in downwind)"],
+	["L / O", "cunningham: ease / pull on (loose until overpowered; draft forward)"],
+	["[ / ]", "traveler: drop to leeward / back to the centre"],
+	[",  /  .", "mast at the deck: pull aft / push forward (marks 3/8 aft, 3/8, 3/4, 1 in fwd)"],
+	["-  /  =", "jib halyard: ease / tighten (rig tension; right off dead downwind)"],
+	[";  /  '", "jib lead: aft / forward (top telltales break first: forward)"],
+	["B,  U / N", "centreboard down / half / up;  raise / lower it a little"],
+	["G", "whisker pole: set (running), stow, or swap it after a gybe"],
+	["Y", "rig panel: every control, its setting, its keys, the sail shape"],
 	["R", "crew rights the boat after a capsize"],
 	["C", "camera: helm, chase, start line, overhead (right-drag to look, wheel)"],
-	["M  /  I", "chart  /  coach numbers (speed, wind, VMG, trim hints)"],
+	["M  /  I", "chart  /  coach numbers (speed, wind, VMG, trim hints, the crew's rig)"],
 	["Tab", "finishers (live standings in coach or assisted mode)"],
-	["T  /  Esc", "time warp x1-x8  /  pause menu"],
+	["T  /  Esc", "time warp x1-x8  /  pause menu (hands controls back to the crew)"],
+]
+
+
+## Keys or pad, whichever was used last.
+func _k(keys: String, pad_text: String) -> String:
+	return pad_text if pad else keys
+
+
+const HELP_PAD := [
+	["Left stick", "tiller handle: push to port and the bow goes to starboard; let go to centre"],
+	["R2 / L2", "pull the main in / ease it, as hard as you squeeze; harder near the centreline"],
+	["L1 / R1", "ease / sheet the jib yourself (pause menu gives it back to the crew)"],
+	["Circle / Square", "hike out / move in yourself"],
+	["D-pad up / down", "centreboard up / down"],
+	["D-pad left / right", "vang: ease / on (slack until hiking hard)"],
+	["Right stick", "look the way you push it, right round to the stern, up or down; let go to look ahead"],
+	["Cross", "camera"],
+	["Triangle", "whisker pole: set, stow, swap after a gybe; capsized: crew rights her; finished: results"],
+	["R3 / L3", "chart / time warp x1-x8"],
+	["Touchpad / Create", "coach numbers / this help"],
+	["Options", "pause menu"],
+	["Keyboard", "the rest of the rig: outhaul V/F, cunningham L/O, traveler [ ], mast , . halyard - =, lead ; '"],
+	["", "Y shows the rig panel; the crew sets these if the pause menu says so; Tab the finishers"],
+	["Rumble", "helm load; the main luffing; R2 stiffening as the boom nears the centreline; a knock"],
 ]
 
 
 func _draw_help() -> void:
-	var r := Rect2(size.x * 0.5 - 420, 60, 840, 700)
+	var r := Rect2(size.x * 0.5 - 450, 30, 900, minf(size.y - 50, 840))
 	draw_rect(r, Color(0.02, 0.04, 0.06, 0.92))
-	var p := r.position + Vector2(24, 40)
-	_text(p, "Controls", 24, ACCENT, -1, HORIZONTAL_ALIGNMENT_LEFT, true)
-	p.y += 36
-	for row: Array in HELP:
-		_text(p, row[0], 16, Color(1, 0.85, 0.5))
-		_text(p + Vector2(200, 0), row[1], 16, Color.WHITE)
-		p.y += 26
+	var p := r.position + Vector2(24, 36)
+	_text(p, "Controls (PS5 controller)" if pad else "Controls", 24, ACCENT, -1, HORIZONTAL_ALIGNMENT_LEFT, true)
+	p.y += 32
+	for row: Array in (HELP_PAD if pad else HELP):
+		_text(p, row[0], 15, Color(1, 0.85, 0.5))
+		_text(p + Vector2(200, 0), row[1], 15, Color.WHITE)
+		p.y += 23
 	p.y += 12
 	_text(p, "Racing (Union Sailing Club 2026 SIs)", 18, ACCENT, -1, HORIZONTAL_ALIGNMENT_LEFT, true)
 	p.y += 26
